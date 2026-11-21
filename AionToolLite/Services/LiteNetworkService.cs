@@ -97,7 +97,7 @@ namespace AionToolLite.Services
             };
             var c = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(45) };
             var v = Assembly.GetExecutingAssembly().GetName().Version;
-            string uaVer = v != null ? $"{v.Major}.{v.Minor}.{Math.Max(0, v.Build)}" : "1.0.0";
+            string uaVer = v != null ? $"{v.Major}.{v.Minor}.{Math.Max(0, v.Build)}" : "1.1.0";
             c.DefaultRequestHeaders.UserAgent.ParseAdd($"AionToolLite/{uaVer}");
             return c;
         }
@@ -223,12 +223,12 @@ namespace AionToolLite.Services
         }
 
         // ==================== AUTOMATIC ACTIVE STATIC DNS DETECTION ====================
-        public Task<ActiveDnsStatus> DetectActiveStaticDnsAsync(string interfaceName)
+        public Task<ActiveDnsStatus> DetectActiveStaticDnsAsync(string interfaceName, IReadOnlyList<SavedCustomDnsEntry>? customEntries = null)
         {
-            return Task.Run(() => DetectActiveStaticDns(interfaceName));
+            return Task.Run(() => DetectActiveStaticDns(interfaceName, customEntries));
         }
 
-        public ActiveDnsStatus DetectActiveStaticDns(string interfaceName)
+        public ActiveDnsStatus DetectActiveStaticDns(string interfaceName, IReadOnlyList<SavedCustomDnsEntry>? customEntries = null)
         {
             try
             {
@@ -275,6 +275,14 @@ namespace AionToolLite.Services
                 if (matched != null)
                 {
                     return new ActiveDnsStatus(true, primary, secondary, matched.Name, matched.Name, matched.Id);
+                }
+
+                if (customEntries != null)
+                {
+                    var customMatched = customEntries.FirstOrDefault(c =>
+                        c.PrimaryIp.Equals(primary, StringComparison.OrdinalIgnoreCase));
+                    if (customMatched != null)
+                        return new ActiveDnsStatus(true, primary, secondary, customMatched.Name, customMatched.Name, customMatched.Id);
                 }
 
                 return new ActiveDnsStatus(true, primary, secondary, "Custom DNS", "دی‌ان‌اس دستی", null);
@@ -681,7 +689,7 @@ namespace AionToolLite.Services
             return null;
         }
 
-        public async Task<LiteTelemetry> CaptureTelemetryAsync(string interfaceName)
+        public async Task<LiteTelemetry> CaptureTelemetryAsync(string interfaceName, IReadOnlyList<SavedCustomDnsEntry>? customEntries = null)
         {
             string routerIp = await Task.Run(() => DetectGatewayIp(interfaceName)).ConfigureAwait(false);
 
@@ -699,7 +707,7 @@ namespace AionToolLite.Services
                 {
                     var nic = NetworkInterface.GetAllNetworkInterfaces()
                         .FirstOrDefault(n => n.Name.Equals(interfaceName, StringComparison.OrdinalIgnoreCase));
-                    var activeDns = DetectActiveStaticDns(interfaceName);
+                    var activeDns = DetectActiveStaticDns(interfaceName, customEntries);
                     if (nic == null)
                         return (Found: false, Rx: 0L, Tx: 0L, ActiveDns: activeDns);
 
@@ -788,13 +796,20 @@ namespace AionToolLite.Services
             return ms.ToArray();
         }
 
-        public async Task<Dictionary<string, long?>> BenchmarkAllPresetsAsync(int rounds = 2, int timeoutMs = 1100, CancellationToken token = default)
+        public async Task<Dictionary<string, long?>> BenchmarkAllPresetsAsync(
+            int rounds = 2,
+            int timeoutMs = 1100,
+            IEnumerable<LiteDnsPreset>? extraPresets = null,
+            CancellationToken token = default)
         {
             var results = new Dictionary<string, long?>(StringComparer.OrdinalIgnoreCase);
             using var sem = new SemaphoreSlim(12);
 
-            var tasks = LiteCatalog.DnsPresets
-                .Where(p => !p.IsSmartAuto)
+            var pool = LiteCatalog.DnsPresets.Where(p => !p.IsSmartAuto);
+            if (extraPresets != null)
+                pool = pool.Concat(extraPresets.Where(p => !p.IsSmartAuto && LiteCatalog.IsSafeDnsIpv4(p.PrimaryIp)));
+
+            var tasks = pool
                 .Select(async preset =>
                 {
                     await sem.WaitAsync(token).ConfigureAwait(false);
@@ -821,13 +836,20 @@ namespace AionToolLite.Services
             return results;
         }
 
-        public async Task<(LiteDnsPreset? Best, long? LatencyMs)> FindFastestPresetAsync(CancellationToken token = default)
+        public async Task<(LiteDnsPreset? Best, long? LatencyMs)> FindFastestPresetAsync(
+            IEnumerable<LiteDnsPreset>? extraPresets = null,
+            CancellationToken token = default)
         {
-            var map = await BenchmarkAllPresetsAsync(rounds: 1, timeoutMs: 950, token: token).ConfigureAwait(false);
+            var customList = extraPresets?.Where(p => !p.IsSmartAuto && LiteCatalog.IsSafeDnsIpv4(p.PrimaryIp)).ToList();
+            var map = await BenchmarkAllPresetsAsync(rounds: 1, timeoutMs: 950, extraPresets: customList, token: token).ConfigureAwait(false);
             LiteDnsPreset? best = null;
             long bestMs = long.MaxValue;
 
-            foreach (var p in LiteCatalog.DnsPresets.Where(x => !x.IsSmartAuto))
+            var candidates = customList != null
+                ? LiteCatalog.DnsPresets.Where(x => !x.IsSmartAuto).Concat(customList)
+                : LiteCatalog.DnsPresets.Where(x => !x.IsSmartAuto);
+
+            foreach (var p in candidates)
             {
                 if (map.TryGetValue(p.Id, out var ms) && ms.HasValue && ms.Value < bestMs)
                 {
@@ -839,6 +861,108 @@ namespace AionToolLite.Services
             return best != null ? (best, bestMs) : (null, null);
         }
 
+        // ==================== NATIVE WINDOWS 11 DNS-OVER-HTTPS (DoH) ====================
+        public static bool IsWindows11NativeDohSupported() => Environment.OSVersion.Version.Build >= 22000;
+
+        private static bool IsSafeDohTemplate(string? template)
+        {
+            if (string.IsNullOrWhiteSpace(template)) return false;
+            string t = template.Trim();
+            if (t.IndexOfAny(ForbiddenShellChars) >= 0) return false;
+            return Uri.TryCreate(t, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps;
+        }
+
+        private async Task<bool> ConfigureNativeDohForIpAsync(string ip, string? dohTemplate, bool enable, CancellationToken token)
+        {
+            if (!IsWindows11NativeDohSupported() || !LiteCatalog.IsSafeDnsIpv4(ip))
+                return false;
+
+            try
+            {
+                if (enable)
+                {
+                    if (!IsSafeDohTemplate(dohTemplate)) return false;
+                    var r = await _runner.RunAsync("netsh", new[]
+                    {
+                        "dns", "add", "encryption",
+                        $"server={ip}",
+                        $"dohtemplate={dohTemplate!.Trim()}",
+                        "autoupgrade=yes",
+                        "udpfallback=yes"
+                    }, token, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                    return r.IsSuccess;
+                }
+                else
+                {
+                    var r = await _runner.RunAsync("netsh", new[]
+                    {
+                        "dns", "delete", "encryption",
+                        $"server={ip}"
+                    }, token, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                    return r.IsSuccess;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public async Task<OperationResult> ToggleNativeDohOnActiveDnsAsync(string interfaceName, bool enable, CancellationToken token = default)
+        {
+            if (!IsWindows11NativeDohSupported())
+            {
+                return new OperationResult(
+                    false,
+                    "Native DoH requires Windows 11 (Build 22000+).",
+                    "رمزنگاری بومی DoH فقط در ویندوز ۱۱ پشتیبانی می‌شود.");
+            }
+
+            var active = DetectActiveStaticDns(interfaceName);
+            if (!active.IsStaticConnected)
+            {
+                return new OperationResult(
+                    true,
+                    enable
+                        ? "Native DoH ON — will encrypt supported servers when you connect."
+                        : "Native DoH OFF.",
+                    enable
+                        ? "رمزنگاری بومی DoH فعال شد — هنگام اتصال به سرورهای پشتیبانی‌شده اعمال می‌شود."
+                        : "رمزنگاری بومی DoH غیرفعال شد.");
+            }
+
+            var preset = LiteCatalog.DnsPresets.FirstOrDefault(p =>
+                !p.IsSmartAuto && p.PrimaryIp.Equals(active.PrimaryIp, StringComparison.OrdinalIgnoreCase));
+
+            if (enable)
+            {
+                if (preset == null || !preset.HasDoh)
+                {
+                    return new OperationResult(
+                        true,
+                        $"DoH ON — saved for supported servers (current '{active.DisplayNameEn}' uses standard UDP).",
+                        $"DoH فعال شد — سرور فعلی ({active.DisplayNameFa}) فاقد آدرس DoH است و روی سرورهای پشتیبانی‌شده اعمال می‌شود.");
+                }
+
+                bool ok = await ConfigureNativeDohForIpAsync(preset.PrimaryIp, preset.DohTemplate, true, token).ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(preset.SecondaryIp))
+                    await ConfigureNativeDohForIpAsync(preset.SecondaryIp, preset.DohTemplate, true, token).ConfigureAwait(false);
+                await FastFlushDnsCacheAsync(token).ConfigureAwait(false);
+
+                return ok
+                    ? new OperationResult(true, $"Native DoH enabled for {preset.Name}!", $"رمزنگاری بومی DoH برای {preset.Name} فعال شد!")
+                    : new OperationResult(false, $"Could not register DoH rule for {preset.Name}.", $"ثبت تنظیمات DoH برای {preset.Name} ناموفق بود.");
+            }
+            else
+            {
+                await ConfigureNativeDohForIpAsync(active.PrimaryIp, null, false, token).ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(active.SecondaryIp))
+                    await ConfigureNativeDohForIpAsync(active.SecondaryIp, null, false, token).ConfigureAwait(false);
+                await FastFlushDnsCacheAsync(token).ConfigureAwait(false);
+                return new OperationResult(true, "Native DoH disabled for active DNS.", "رمزنگاری بومی DoH غیرفعال شد.");
+            }
+        }
+
         // ==================== OPTIMIZED SEQUENTIAL DNS CONNECT & CLEAN DISCONNECT ====================
         public async Task<OperationResult> ApplyDnsAsync(
             string interfaceName,
@@ -847,6 +971,8 @@ namespace AionToolLite.Services
             string label,
             string? primaryIpv6 = null,
             string? secondaryIpv6 = null,
+            string? dohTemplate = null,
+            bool enableNativeDoh = false,
             bool skipBackup = false,
             CancellationToken token = default)
         {
@@ -916,12 +1042,21 @@ namespace AionToolLite.Services
                 }, token, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
             }
 
+            bool dohApplied = false;
+            if (enableNativeDoh && IsWindows11NativeDohSupported() && IsSafeDohTemplate(dohTemplate))
+            {
+                dohApplied = await ConfigureNativeDohForIpAsync(cleanPrimary, dohTemplate, true, token).ConfigureAwait(false);
+                if (cleanSecondary != null)
+                    await ConfigureNativeDohForIpAsync(cleanSecondary, dohTemplate, true, token).ConfigureAwait(false);
+            }
+
             await FastFlushDnsCacheAsync(token).ConfigureAwait(false);
 
+            string dohSuffix = dohApplied ? " · DoH" : string.Empty;
             return new OperationResult(
                 true,
-                $"Connected to {label} ({cleanPrimary})",
-                $"متصل به {label} ({cleanPrimary})");
+                $"Connected to {label} ({cleanPrimary}){dohSuffix}",
+                $"متصل به {label} ({cleanPrimary}){dohSuffix}");
         }
 
         public async Task<OperationResult> DisconnectDnsToAutoAsync(string interfaceName, CancellationToken token = default)
@@ -1569,6 +1704,118 @@ namespace AionToolLite.Services
             }
         }
 
+        // ==================== QUICK STABILITY / PACKET LOSS & JITTER CHECK (~4-5s) ====================
+        private static async Task<(double LossPct, long? AvgMs, long? JitterMs)> ProbeHostStabilityAsync(
+            string hostOrIp, int count, int intervalMs, CancellationToken token)
+        {
+            if (!IPAddress.TryParse(hostOrIp, out var ip))
+                return (100.0, null, null);
+
+            var rtts = new List<long>(count);
+            var opts = new PingOptions(64, false);
+
+            for (int i = 0; i < count; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                try
+                {
+                    using var p = new Ping();
+                    var reply = await p.SendPingAsync(ip, 900, PingPayload, opts).ConfigureAwait(false);
+                    if (reply.Status == IPStatus.Success)
+                        rtts.Add(reply.RoundtripTime);
+                }
+                catch { }
+
+                if (i < count - 1)
+                    await Task.Delay(intervalMs, token).ConfigureAwait(false);
+            }
+
+            double lossPct = Math.Round(((count - rtts.Count) * 100.0) / count, 1);
+            if (rtts.Count == 0)
+                return (lossPct, null, null);
+
+            long avg = (long)Math.Round(rtts.Average());
+            long jitter = 0;
+            if (rtts.Count >= 2)
+            {
+                long diffSum = 0;
+                for (int i = 1; i < rtts.Count; i++)
+                    diffSum += Math.Abs(rtts[i] - rtts[i - 1]);
+                jitter = (long)Math.Round(diffSum / (double)(rtts.Count - 1));
+            }
+
+            return (lossPct, avg, jitter);
+        }
+
+        public async Task<StabilityCheckResult> RunStabilityCheckAsync(string interfaceName, CancellationToken token = default)
+        {
+            const int probes = 14;
+            const int intervalMs = 260;
+
+            try
+            {
+                string routerIp = await Task.Run(() => DetectGatewayIp(interfaceName), token).ConfigureAwait(false);
+                var tGlobal = ProbeHostStabilityAsync("4.2.2.4", probes, intervalMs, token);
+                Task<(double LossPct, long? AvgMs, long? JitterMs)>? tRouter = !string.IsNullOrEmpty(routerIp)
+                    ? ProbeHostStabilityAsync(routerIp, probes, intervalMs, token)
+                    : null;
+
+                if (tRouter != null)
+                    await Task.WhenAll(tGlobal, tRouter).ConfigureAwait(false);
+                else
+                    await tGlobal.ConfigureAwait(false);
+
+                var g = tGlobal.Result;
+                (double LossPct, long? AvgMs, long? JitterMs)? r = tRouter != null ? tRouter.Result : null;
+
+                string verdictEn;
+                string verdictFa;
+
+                if (r.HasValue && (r.Value.LossPct >= 5.0 || (r.Value.JitterMs ?? 0) >= 15))
+                {
+                    verdictEn = "Local Wi-Fi / Modem instability detected";
+                    verdictFa = "ناپایداری داخلی است (وای‌فای یا مودم شما)";
+                }
+                else if (!g.AvgMs.HasValue || g.LossPct >= 5.0 || (g.JitterMs ?? 0) >= 25)
+                {
+                    verdictEn = "Modem OK · ISP / Internet unstable";
+                    verdictFa = "مودم سالم · ناپایداری از اینترنت / ISP";
+                }
+                else if (g.LossPct == 0 && (g.JitterMs ?? 0) <= 12)
+                {
+                    verdictEn = "Rock-solid for gaming!";
+                    verdictFa = "عالی و کاملاً پایدار برای گیم!";
+                }
+                else
+                {
+                    verdictEn = "Good line stability";
+                    verdictFa = "پایداری خط مناسب است";
+                }
+
+                return new StabilityCheckResult(
+                    Success: true,
+                    SentCount: probes,
+                    GlobalLossPct: g.LossPct,
+                    GlobalAvgMs: g.AvgMs,
+                    GlobalJitterMs: g.JitterMs,
+                    RouterLossPct: r?.LossPct,
+                    RouterAvgMs: r?.AvgMs,
+                    RouterJitterMs: r?.JitterMs,
+                    VerdictEn: verdictEn,
+                    VerdictFa: verdictFa);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                return new StabilityCheckResult(
+                    false, probes, 100, null, null, null, null, null,
+                    "Stability check failed", "خطا در اجرای تست پایداری");
+            }
+        }
+
         // ==================== HARDENED GITHUB AUTO-UPDATER (ADMIN-LOCKED STAGING + SHA256 + PE CHECK) ====================
         private static bool IsTrustedGitHubHttpsUrl(string? url, out Uri? uri)
         {
@@ -1642,12 +1889,43 @@ namespace AionToolLite.Services
             return _secureUpdatesDir;
         }
 
+        public async Task<(bool HasUpdate, string LatestVersion)> CheckLatestUpdateInfoAsync(string owner, string repo, CancellationToken token = default)
+        {
+            try
+            {
+                var rawVer = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 1, 0);
+                var currentVer = new Version(Math.Max(0, rawVer.Major), Math.Max(0, rawVer.Minor), Math.Max(0, rawVer.Build));
+
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                cts.CancelAfter(TimeSpan.FromSeconds(8));
+
+                using var req = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{owner}/{repo}/releases/latest");
+                req.Headers.Accept.ParseAdd("application/vnd.github+json");
+                using var resp = await SharedHttp.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode)
+                    return (false, string.Empty);
+
+                string json = await resp.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
+                using var doc = JsonDocument.Parse(json);
+                string tag = doc.RootElement.TryGetProperty("tag_name", out var tEl) ? tEl.GetString() ?? "" : "";
+                if (!Version.TryParse(tag.TrimStart('v', 'V').Trim(), out var parsed) || parsed == null)
+                    return (false, string.Empty);
+
+                var latestVer = new Version(Math.Max(0, parsed.Major), Math.Max(0, parsed.Minor), Math.Max(0, parsed.Build));
+                return latestVer > currentVer ? (true, latestVer.ToString()) : (false, string.Empty);
+            }
+            catch
+            {
+                return (false, string.Empty);
+            }
+        }
+
         public async Task<OperationResult> CheckAndInstallUpdateAsync(string owner, string repo, CancellationToken token = default)
         {
             string? stagedExe = null;
             try
             {
-                var rawVer = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 0, 0);
+                var rawVer = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 1, 0);
                 var currentVer = new Version(Math.Max(0, rawVer.Major), Math.Max(0, rawVer.Minor), Math.Max(0, rawVer.Build));
 
                 using var req = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{owner}/{repo}/releases/latest");
@@ -1820,11 +2098,21 @@ namespace AionToolLite.Services
                     {
                         var loaded = JsonSerializer.Deserialize<LiteSettings>(json);
                         if (loaded != null)
-                            return loaded with { PinnedDnsIds = loaded.PinnedDnsIds ?? new List<string>() };
+                        {
+                            var safeCustom = (loaded.SavedCustomDns ?? new List<SavedCustomDnsEntry>())
+                                .Where(c => c != null && !string.IsNullOrWhiteSpace(c.Id) && !string.IsNullOrWhiteSpace(c.Name) && LiteCatalog.IsSafeDnsIpv4(c.PrimaryIp))
+                                .Take(5)
+                                .ToList();
+                            return loaded with
+                            {
+                                PinnedDnsIds = loaded.PinnedDnsIds ?? new List<string>(),
+                                SavedCustomDns = safeCustom
+                            };
+                        }
                     }
                 }
                 catch { }
-                return new LiteSettings(PinnedDnsIds: new List<string>());
+                return new LiteSettings(PinnedDnsIds: new List<string>(), SavedCustomDns: new List<SavedCustomDnsEntry>());
             }
         }
 

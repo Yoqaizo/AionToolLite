@@ -2,6 +2,15 @@
 
 All notable changes to **AionToolLite** are documented in this file.
 
+## [1.1.0] - 2026-11-21
+### Added
+- **Native Windows 11 DoH Encryption:** Added one-tap DoH toggle (`netsh dns add encryption` with `udpfallback=yes`) and `DoH` micro-badges across 13 supported built-in DNS servers.
+- **Stability & Packet Loss / Jitter Check:** Added 4-second Boost diagnostic comparing Modem Gateway vs Internet (`4.2.2.4`) latency, jitter, and packet loss with automatic root-cause verdict.
+- **5 Saved Custom DNS Slots:** Added named custom DNS persistence (up to 5 slots) with pin (`★`), delete (`✕`), UDP/53 benchmarking, Smart Auto inclusion, and Tray quick-switch support.
+- **Tray Connected Status Dot & Global Hotkey (`Ctrl + Alt + D`):** Added dynamic emerald badge on the System Tray icon when connected (with GDI `DestroyIcon` cleanup) and toggleable Win32 `RegisterHotKey` support.
+- **Auto-Connect on Startup:** Added optional setting to automatically connect the selected DNS / Smart Auto on app launch.
+- **Silent Startup Update Badge:** Added non-blocking background GitHub release check showing a subtle dot on Settings when a newer version is available.
+
 ## [1.0.0] - 2026-11-21
 ### Added
 - **Initial Official Release of AionToolLite** (.NET 8 WPF, Windows 10/11 x64, GNU GPL v3.0).

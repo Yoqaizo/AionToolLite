@@ -4,11 +4,13 @@ using System.Diagnostics;
 using System.Linq;
 using System.Net.NetworkInformation;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
@@ -24,12 +26,25 @@ namespace AionToolLite
     {
         private enum OrbVisualState { Idle, Connecting, Disconnecting, Connected }
 
+        private const int GlobalHotkeyId = 0xA10D;
+        private const uint ModAlt = 0x0001;
+        private const uint ModControl = 0x0002;
+        private const uint ModNoRepeat = 0x4000;
+        private const uint VkD = 0x44;
+        private const int WmHotkey = 0x0312;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
         private readonly LiteNetworkService _service = new();
         private readonly DispatcherTimer _telemetryTimer = new() { Interval = TimeSpan.FromSeconds(2.2) };
         private readonly NetworkAddressChangedEventHandler _netChangeHandler;
         private TrayManager? _tray;
 
-        private LiteSettings _settings = new(PinnedDnsIds: new List<string>());
+        private LiteSettings _settings = new(PinnedDnsIds: new List<string>(), SavedCustomDns: new List<SavedCustomDnsEntry>());
         private LiteTheme _currentTheme = LiteCatalog.Themes[0];
         private LiteDnsPreset _selectedPreset = LiteCatalog.DnsPresets[0];
         private LiteDnsPreset? _fastestWinner;
@@ -41,6 +56,9 @@ namespace AionToolLite
         private PingChannelMode _pingMode = PingChannelMode.Global;
         private LiteTelemetry? _lastTelemetry;
         private string _lastPublicIp = string.Empty;
+        private string? _pendingUpdateVersion;
+        private HwndSource? _hwndSource;
+        private bool _hotkeyRegistered;
 
         private readonly Dictionary<string, long?> _dnsLatencies = new(StringComparer.OrdinalIgnoreCase);
         private CancellationTokenSource? _toastCts;
@@ -68,6 +86,8 @@ namespace AionToolLite
         private static readonly SolidColorBrush FrozenGold = Freeze(new SolidColorBrush(GoldCol));
         private static readonly SolidColorBrush FrozenRed = Freeze(new SolidColorBrush(RedCol));
         private static readonly SolidColorBrush FrozenDotDim = Freeze(new SolidColorBrush((Color)ColorConverter.ConvertFromString("#475569")));
+        private static readonly SolidColorBrush FrozenCyan = Freeze(new SolidColorBrush((Color)ColorConverter.ConvertFromString("#67E8F9")));
+        private static readonly SolidColorBrush FrozenCyanSoft = Freeze(new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2667E8F9")));
 
         private static SolidColorBrush Freeze(SolidColorBrush b)
         {
@@ -78,6 +98,9 @@ namespace AionToolLite
         private bool IsFa => _settings.Language == "fa";
         private string L(string en, string fa) => IsFa ? fa : en;
         private List<string> PinnedIds => _settings.PinnedDnsIds ?? new List<string>();
+        private List<SavedCustomDnsEntry> SavedCustomEntries => _settings.SavedCustomDns ?? new List<SavedCustomDnsEntry>();
+        private IEnumerable<LiteDnsPreset> SavedCustomPresets => SavedCustomEntries.Select(e => e.ToPreset());
+        private IEnumerable<LiteDnsPreset> AllDnsPresets => LiteCatalog.DnsPresets.Concat(SavedCustomPresets);
 
         public MainWindow()
         {
@@ -129,9 +152,9 @@ namespace AionToolLite
             if (_tray == null || _isClosing) return;
 
             var pinned = PinnedIds;
-            var quickList = LiteCatalog.DnsPresets
-                .OrderBy(p => p.IsSmartAuto ? 0 : pinned.Contains(p.Id, StringComparer.OrdinalIgnoreCase) ? 1 : 2)
-                .Take(7)
+            var quickList = AllDnsPresets
+                .OrderBy(p => p.IsSmartAuto ? 0 : pinned.Contains(p.Id, StringComparer.OrdinalIgnoreCase) ? 1 : p.IsCustom ? 2 : 3)
+                .Take(8)
                 .ToList();
 
             string activeName = L(_activeDns.DisplayNameEn, _activeDns.DisplayNameFa);
@@ -187,20 +210,26 @@ namespace AionToolLite
                 {
                     SetOrbState(OrbVisualState.Disconnecting);
                     var res = await _service.DisconnectDnsToAutoAsync(_selectedAdapter);
-                    _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter);
+                    _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter, SavedCustomEntries);
                     SetOrbState(_activeDns.IsStaticConnected ? OrbVisualState.Connected : OrbVisualState.Idle);
                     UpdateSelectedDnsHomeCard();
                     RebuildDnsCards();
                     RefreshTrayState();
-                    _tray?.ShowBalloon("AionToolLite", L(res.MessageEn, res.MessageFa));
+                    if (IsVisible && WindowState != WindowState.Minimized)
+                        ShowToast(L(res.MessageEn, res.MessageFa), isError: !res.Success);
+                    else
+                        _tray?.ShowBalloon("AionToolLite", L(res.MessageEn, res.MessageFa));
                 }
                 else
                 {
                     await ConnectPresetAsync(_selectedPreset);
-                    _tray?.ShowBalloon("AionToolLite",
-                        _activeDns.IsStaticConnected
-                            ? L($"Connected to {_activeDns.DisplayNameEn}", $"متصل به {_activeDns.DisplayNameFa}")
-                            : L("Connection failed.", "اتصال ناموفق بود."));
+                    if (!IsVisible || WindowState == WindowState.Minimized)
+                    {
+                        _tray?.ShowBalloon("AionToolLite",
+                            _activeDns.IsStaticConnected
+                                ? L($"Connected to {_activeDns.DisplayNameEn}", $"متصل به {_activeDns.DisplayNameFa}")
+                                : L("Connection failed.", "اتصال ناموفق بود."));
+                    }
                 }
             }
             catch (Exception ex)
@@ -287,19 +316,20 @@ namespace AionToolLite
 
                 _settings = await Task.Run(() => _service.LoadSettings());
                 _currentTheme = LiteCatalog.Themes.FirstOrDefault(t => t.Id == _settings.ThemeId) ?? LiteCatalog.Themes[0];
-                _selectedPreset = LiteCatalog.DnsPresets.FirstOrDefault(p => p.Id == _settings.SelectedDnsId) ?? LiteCatalog.DnsPresets[0];
+                _selectedPreset = AllDnsPresets.FirstOrDefault(p => p.Id == _settings.SelectedDnsId) ?? LiteCatalog.DnsPresets[0];
                 _pingMode = Enum.IsDefined(typeof(PingChannelMode), _settings.PingChannel)
                     ? (PingChannelMode)_settings.PingChannel
                     : PingChannelMode.Global;
 
                 TxtCustomDns1.Text = string.IsNullOrWhiteSpace(_settings.CustomDns1) ? "1.1.1.1" : _settings.CustomDns1;
                 TxtCustomDns2.Text = string.IsNullOrWhiteSpace(_settings.CustomDns2) ? "1.0.0.1" : _settings.CustomDns2;
+                UpdateCustomSlotCountLabel();
 
                 ComboHostsBlocklist.ItemsSource = LiteCatalog.Blocklists;
                 ComboHostsBlocklist.SelectedIndex = 0;
 
                 var asmVer = Assembly.GetExecutingAssembly().GetName().Version;
-                string verLabel = asmVer != null ? $"{asmVer.Major}.{asmVer.Minor}.{Math.Max(0, asmVer.Build)}" : "1.0.0";
+                string verLabel = asmVer != null ? $"{asmVer.Major}.{asmVer.Minor}.{Math.Max(0, asmVer.Build)}" : "1.1.0";
                 TxtAppFooterVersion.Text = $"AionToolLite v{verLabel}  ·  Created by Yoqaizo";
 
                 LiteThemeManager.Apply(_currentTheme);
@@ -307,6 +337,9 @@ namespace AionToolLite
                 ApplyLanguage();
 
                 ToggleMinToTray.IsChecked = _settings.MinimizeToTray;
+                ToggleAutoConnect.IsChecked = _settings.AutoConnectOnStartup;
+                ToggleGlobalHotkey.IsChecked = _settings.EnableGlobalHotkey;
+                ToggleNativeDoh.IsChecked = _settings.EnableNativeDoH && LiteNetworkService.IsWindows11NativeDohSupported();
 
                 var stateTask = Task.Run(() => (Game: _service.IsGameModeActive(), AdShield: _service.IsAdShieldActive()));
                 var autoStartTask = _service.IsAutoStartEnabledAsync();
@@ -319,7 +352,7 @@ namespace AionToolLite
                 await LoadAdaptersAsync(preserveSelection: false);
                 await RefreshHostsUiAsync();
 
-                _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter);
+                _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter, SavedCustomEntries);
                 _isReady = true;
 
                 SetOrbState(_activeDns.IsStaticConnected ? OrbVisualState.Connected : OrbVisualState.Idle);
@@ -328,6 +361,7 @@ namespace AionToolLite
                 RenderPingCard();
 
                 InitializeTray();
+                ApplyGlobalHotkeyState(_settings.EnableGlobalHotkey, showErrorToast: false);
 
                 if (App.StartMinimized)
                 {
@@ -337,7 +371,129 @@ namespace AionToolLite
 
                 _telemetryTimer.Start();
                 await RefreshTelemetryAsync();
+
+                _ = CheckUpdateBadgeSilentlyAsync();
+
+                if (_settings.AutoConnectOnStartup && !_activeDns.IsStaticConnected && !string.IsNullOrEmpty(_selectedAdapter))
+                {
+                    _ = AutoConnectOnStartupAsync();
+                }
             }, "Startup");
+        }
+
+        private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            if (msg == WmHotkey && wParam.ToInt32() == GlobalHotkeyId)
+            {
+                handled = true;
+                Dispatcher.InvokeAsync(ToggleConnectFromTrayAsync);
+            }
+            return IntPtr.Zero;
+        }
+
+        private bool ApplyGlobalHotkeyState(bool enable, bool showErrorToast)
+        {
+            try
+            {
+                var helper = new WindowInteropHelper(this);
+                IntPtr handle = helper.Handle != IntPtr.Zero ? helper.Handle : helper.EnsureHandle();
+
+                if (_hwndSource == null)
+                {
+                    _hwndSource = HwndSource.FromHwnd(handle);
+                    _hwndSource?.AddHook(WndProc);
+                }
+
+                if (_hotkeyRegistered)
+                {
+                    UnregisterHotKey(handle, GlobalHotkeyId);
+                    _hotkeyRegistered = false;
+                }
+
+                if (!enable)
+                    return true;
+
+                bool ok = RegisterHotKey(handle, GlobalHotkeyId, ModControl | ModAlt | ModNoRepeat, VkD);
+                _hotkeyRegistered = ok;
+                if (!ok && showErrorToast)
+                {
+                    ShowToast(
+                        L("Ctrl+Alt+D is already used by another app.", "کلید ترکیبی Ctrl+Alt+D توسط برنامه دیگری اشغال شده است."),
+                        isError: true);
+                }
+                return ok;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void UnregisterGlobalHotkey()
+        {
+            try
+            {
+                if (_hwndSource != null)
+                {
+                    if (_hotkeyRegistered && _hwndSource.Handle != IntPtr.Zero)
+                        UnregisterHotKey(_hwndSource.Handle, GlobalHotkeyId);
+                    _hwndSource.RemoveHook(WndProc);
+                    _hwndSource = null;
+                }
+                _hotkeyRegistered = false;
+            }
+            catch { }
+        }
+
+        private async Task CheckUpdateBadgeSilentlyAsync()
+        {
+            try
+            {
+                await Task.Delay(1800);
+                if (_isClosing) return;
+                var (hasUpdate, latestVer) = await _service.CheckLatestUpdateInfoAsync("Yoqaizo", "AionToolLite");
+                if (_isClosing || !hasUpdate || string.IsNullOrWhiteSpace(latestVer)) return;
+
+                _pendingUpdateVersion = latestVer;
+                SettingsUpdateBadge.Visibility = Visibility.Visible;
+                UpdateCheckUpdatesButtonLabel();
+            }
+            catch { }
+        }
+
+        private void UpdateCheckUpdatesButtonLabel()
+        {
+            if (!string.IsNullOrWhiteSpace(_pendingUpdateVersion))
+            {
+                BtnCheckUpdates.Content = L(
+                    $"✨ Update Available (v{_pendingUpdateVersion})",
+                    $"✨ نسخه جدید آماده نصب (v{_pendingUpdateVersion})");
+            }
+            else
+            {
+                BtnCheckUpdates.Content = L("🔄 Check for Updates", "🔄 بررسی بروزرسانی");
+            }
+        }
+
+        private async Task AutoConnectOnStartupAsync()
+        {
+            if (_isBusy || _isClosing) return;
+            _isBusy = true;
+            try
+            {
+                await RunSafeAsync(() => ConnectPresetAsync(_selectedPreset), "AutoConnectStartup");
+                if (!_isClosing && App.StartMinimized && _activeDns.IsStaticConnected)
+                {
+                    _tray?.ShowBalloon(
+                        "AionToolLite",
+                        L($"Auto-connected to {_activeDns.DisplayNameEn} ({_activeDns.PrimaryIp})",
+                          $"اتصال خودکار به {_activeDns.DisplayNameFa} ({_activeDns.PrimaryIp})"));
+                }
+            }
+            finally
+            {
+                _isBusy = false;
+            }
         }
 
         protected override void OnClosed(EventArgs e)
@@ -345,6 +501,7 @@ namespace AionToolLite
             _isClosing = true;
             try
             {
+                UnregisterGlobalHotkey();
                 _telemetryTimer.Stop();
                 _toastCts?.Cancel();
                 _toastCts?.Dispose();
@@ -637,7 +794,7 @@ namespace AionToolLite
                     int remaining = 380 - (int)sw.ElapsedMilliseconds;
                     if (remaining > 0) await Task.Delay(remaining);
 
-                    _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter);
+                    _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter, SavedCustomEntries);
                     if (res.Success && !_activeDns.IsStaticConnected)
                     {
                         SetOrbState(OrbVisualState.Idle);
@@ -677,7 +834,7 @@ namespace AionToolLite
             if (preset.IsSmartAuto)
             {
                 TxtHeroSubtitle.Text = L("Finding the fastest DNS for your line...", "در حال یافتن سریع‌ترین سرور برای اینترنت شما...");
-                var (best, ms) = await _service.FindFastestPresetAsync();
+                var (best, ms) = await _service.FindFastestPresetAsync(SavedCustomPresets);
                 if (best != null)
                 {
                     target = best;
@@ -695,7 +852,9 @@ namespace AionToolLite
                 target.SecondaryIp,
                 target.Name,
                 target.PrimaryIpv6,
-                target.SecondaryIpv6);
+                target.SecondaryIpv6,
+                target.DohTemplate,
+                _settings.EnableNativeDoH);
 
             int remaining = 380 - (int)sw.ElapsedMilliseconds;
             if (remaining > 0) await Task.Delay(remaining);
@@ -710,7 +869,7 @@ namespace AionToolLite
             }
             else
             {
-                _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter);
+                _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter, SavedCustomEntries);
                 SetOrbState(_activeDns.IsStaticConnected ? OrbVisualState.Connected : OrbVisualState.Idle);
                 ShowToast(L(res.MessageEn, res.MessageFa), isError: true);
             }
@@ -772,19 +931,48 @@ namespace AionToolLite
                 : L($"Unpinned {preset.Name}", $"پین {preset.Name} برداشته شد"));
         }
 
+        private void UpdateCustomSlotCountLabel()
+        {
+            TxtCustomSlotCount.Text = $"{SavedCustomEntries.Count} / 5";
+        }
+
+        private void DeleteSavedCustomDns(LiteDnsPreset target)
+        {
+            var list = new List<SavedCustomDnsEntry>(SavedCustomEntries);
+            int removed = list.RemoveAll(c => c.Id.Equals(target.Id, StringComparison.OrdinalIgnoreCase));
+            if (removed == 0) return;
+
+            var pins = new List<string>(PinnedIds);
+            pins.RemoveAll(x => x.Equals(target.Id, StringComparison.OrdinalIgnoreCase));
+
+            string selId = _settings.SelectedDnsId;
+            if (selId.Equals(target.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                _selectedPreset = LiteCatalog.DnsPresets[0];
+                selId = _selectedPreset.Id;
+            }
+
+            _settings = _settings with { SavedCustomDns = list, PinnedDnsIds = pins, SelectedDnsId = selId };
+            _service.SaveSettings(_settings);
+            UpdateCustomSlotCountLabel();
+            UpdateSelectedDnsHomeCard();
+            RebuildDnsCards();
+            RefreshTrayState();
+            ShowToast(L($"Removed '{target.Name}'", $"سرور دستی «{target.Name}» حذف شد"));
+        }
+
         private void RebuildDnsCards()
         {
             DnsCardsPanel.Children.Clear();
             var pins = PinnedIds;
 
-            IEnumerable<LiteDnsPreset> items = LiteCatalog.DnsPresets;
+            IEnumerable<LiteDnsPreset> items = AllDnsPresets;
             if (_dnsFilter == "IranGame") items = items.Where(p => p.Category == DnsCategory.IranGame);
             else if (_dnsFilter == "Global") items = items.Where(p => p.Category == DnsCategory.Global);
             else if (_dnsFilter == "Security") items = items.Where(p => p.Category == DnsCategory.Security);
 
-            // Order: Smart Auto -> Pinned Favorites -> Fastest measured latency
             var ordered = items
-                .OrderBy(p => p.IsSmartAuto ? 0 : pins.Contains(p.Id, StringComparer.OrdinalIgnoreCase) ? 1 : 2)
+                .OrderBy(p => p.IsSmartAuto ? 0 : pins.Contains(p.Id, StringComparer.OrdinalIgnoreCase) ? 1 : p.IsCustom ? 2 : 3)
                 .ThenBy(p => _dnsLatencies.TryGetValue(p.Id, out var ms) && ms.HasValue ? ms.Value : long.MaxValue)
                 .ToList();
 
@@ -824,6 +1012,24 @@ namespace AionToolLite
                     FontWeight = FontWeights.Bold,
                     Foreground = (Brush)FindResource("PrimaryTextBrush")
                 });
+                if (p.HasDoh)
+                {
+                    titleRow.Children.Add(new Border
+                    {
+                        Background = FrozenCyanSoft,
+                        CornerRadius = new CornerRadius(6),
+                        Padding = new Thickness(5, 1, 5, 1),
+                        Margin = new Thickness(6, 0, 0, 0),
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Child = new TextBlock
+                        {
+                            Text = "DoH",
+                            FontSize = 8.5,
+                            FontWeight = FontWeights.Bold,
+                            Foreground = FrozenCyan
+                        }
+                    });
+                }
                 if (isActiveNow)
                 {
                     titleRow.Children.Add(new TextBlock
@@ -859,7 +1065,7 @@ namespace AionToolLite
                     CornerRadius = new CornerRadius(10),
                     Padding = new Thickness(8, 3, 8, 3),
                     VerticalAlignment = VerticalAlignment.Center,
-                    Margin = new Thickness(6, 0, p.IsSmartAuto ? 0 : 30, 0),
+                    Margin = new Thickness(6, 0, p.IsSmartAuto ? 0 : p.IsCustom ? 58 : 30, 0),
                     Child = pillText
                 };
 
@@ -943,6 +1149,28 @@ namespace AionToolLite
                             TogglePinDns(target);
                     };
                     rowHost.Children.Add(starBtn);
+
+                    if (p.IsCustom)
+                    {
+                        var delBtn = new Button
+                        {
+                            Style = (Style)FindResource("StarPinBtnStyle"),
+                            Content = "✕",
+                            FontSize = 11,
+                            Foreground = FrozenRed,
+                            HorizontalAlignment = HorizontalAlignment.Right,
+                            VerticalAlignment = VerticalAlignment.Center,
+                            Margin = new Thickness(0, 0, 36, 0),
+                            ToolTip = L("Delete saved server", "حذف سرور ذخیره‌شده"),
+                            Tag = p
+                        };
+                        delBtn.Click += (s, _) =>
+                        {
+                            if (s is Button db && db.Tag is LiteDnsPreset target)
+                                DeleteSavedCustomDns(target);
+                        };
+                        rowHost.Children.Add(delBtn);
+                    }
                 }
 
                 DnsCardsPanel.Children.Add(rowHost);
@@ -971,7 +1199,7 @@ namespace AionToolLite
 
             await RunSafeAsync(async () =>
             {
-                var results = await _service.BenchmarkAllPresetsAsync();
+                var results = await _service.BenchmarkAllPresetsAsync(extraPresets: SavedCustomPresets);
                 foreach (var kv in results)
                     _dnsLatencies[kv.Key] = kv.Value;
 
@@ -984,10 +1212,11 @@ namespace AionToolLite
 
                 if (!string.IsNullOrEmpty(fastest.Key))
                 {
-                    _fastestWinner = LiteCatalog.DnsPresets.First(x => x.Id == fastest.Key);
-                    _fastestWinnerMs = fastest.Value;
+                    _fastestWinner = AllDnsPresets.FirstOrDefault(x => x.Id == fastest.Key);
+                    _fastestWinnerMs = _fastestWinner != null ? fastest.Value : null;
                     UpdateFastestWinnerBanner();
-                    ShowToast(L($"Fastest: {_fastestWinner.Name} ({fastest.Value} ms)", $"سریع‌ترین: {_fastestWinner.Name} ({fastest.Value} میلی‌ثانیه)"));
+                    if (_fastestWinner != null)
+                        ShowToast(L($"Fastest: {_fastestWinner.Name} ({fastest.Value} ms)", $"سریع‌ترین: {_fastestWinner.Name} ({fastest.Value} میلی‌ثانیه)"));
                 }
                 else
                 {
@@ -1018,11 +1247,53 @@ namespace AionToolLite
             finally { _isBusy = false; }
         }
 
+        private void BtnSaveCustomDns_Click(object sender, RoutedEventArgs e)
+        {
+            string d1 = TxtCustomDns1.Text.Trim();
+            string d2 = TxtCustomDns2.Text.Trim();
+            string rawName = TxtCustomDnsName.Text.Trim();
+
+            if (!LiteCatalog.IsSafeDnsIpv4(d1))
+            {
+                ShowToast(L("Enter a valid Primary IPv4 (e.g. 1.1.1.1)", "آدرس DNS اول معتبر نیست (مثلاً 1.1.1.1)"), isError: true);
+                return;
+            }
+            if (!string.IsNullOrEmpty(d2) && !LiteCatalog.IsSafeDnsIpv4(d2))
+            {
+                ShowToast(L("Secondary IPv4 is invalid.", "آدرس DNS دوم معتبر نیست."), isError: true);
+                return;
+            }
+
+            var list = new List<SavedCustomDnsEntry>(SavedCustomEntries);
+            if (list.Count >= 5)
+            {
+                ShowToast(L("Maximum 5 custom DNS slots reached. Delete one first.", "حداکثر ۵ اسلات ذخیره پر شده است. ابتدا یکی را حذف کنید."), isError: true);
+                return;
+            }
+
+            string cleanName = string.IsNullOrWhiteSpace(rawName)
+                ? $"Custom #{list.Count + 1}"
+                : (rawName.Length > 28 ? rawName[..28] : rawName);
+
+            var entry = new SavedCustomDnsEntry($"custom_{Guid.NewGuid():N}"[..16], cleanName, d1, d2);
+            list.Add(entry);
+
+            _settings = _settings with { SavedCustomDns = list, CustomDns1 = d1, CustomDns2 = d2 };
+            _service.SaveSettings(_settings);
+            TxtCustomDnsName.Text = string.Empty;
+            UpdateCustomSlotCountLabel();
+            RebuildDnsCards();
+            RefreshTrayState();
+            ShowToast(L($"Saved '{cleanName}' ({d1})!", $"سرور «{cleanName}» ({d1}) ذخیره شد!"));
+        }
+
         private async void BtnApplyCustomDns_Click(object sender, RoutedEventArgs e)
         {
             if (_isBusy) return;
             string d1 = TxtCustomDns1.Text.Trim();
             string d2 = TxtCustomDns2.Text.Trim();
+            string rawName = TxtCustomDnsName.Text.Trim();
+            string label = string.IsNullOrWhiteSpace(rawName) ? "Custom DNS" : (rawName.Length > 28 ? rawName[..28] : rawName);
 
             if (!LiteCatalog.IsSafeDnsIpv4(d1))
             {
@@ -1045,15 +1316,15 @@ namespace AionToolLite
 
             await RunSafeAsync(async () =>
             {
-                var res = await _service.ApplyDnsAsync(_selectedAdapter, d1, string.IsNullOrEmpty(d2) ? null : d2, "Custom DNS");
+                var res = await _service.ApplyDnsAsync(_selectedAdapter, d1, string.IsNullOrEmpty(d2) ? null : d2, label);
                 int remaining = 380 - (int)sw.ElapsedMilliseconds;
                 if (remaining > 0) await Task.Delay(remaining);
 
                 if (res.Success)
                 {
-                    _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter);
+                    _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter, SavedCustomEntries);
                     if (!_activeDns.IsStaticConnected)
-                        _activeDns = new ActiveDnsStatus(true, d1, d2, "Custom DNS", "دی‌ان‌اس دستی", null);
+                        _activeDns = new ActiveDnsStatus(true, d1, d2, label, string.IsNullOrWhiteSpace(rawName) ? "دی‌ان‌اس دستی" : label, null);
 
                     SetOrbState(OrbVisualState.Connected);
                     UpdateSelectedDnsHomeCard();
@@ -1062,7 +1333,7 @@ namespace AionToolLite
                 }
                 else
                 {
-                    _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter);
+                    _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter, SavedCustomEntries);
                     SetOrbState(_activeDns.IsStaticConnected ? OrbVisualState.Connected : OrbVisualState.Idle);
                     ShowToast(L(res.MessageEn, res.MessageFa), isError: true);
                 }
@@ -1170,6 +1441,72 @@ namespace AionToolLite
             SpeedCheckProgress.Visibility = Visibility.Collapsed;
             TxtSpeedCheckBadge.Text = L("Start", "شروع");
             BtnQuickSpeed.IsEnabled = true;
+        }
+
+        private async void ToggleNativeDoh_Click(object sender, RoutedEventArgs e)
+        {
+            bool target = ToggleNativeDoh.IsChecked == true;
+            if (target && !LiteNetworkService.IsWindows11NativeDohSupported())
+            {
+                ToggleNativeDoh.IsChecked = false;
+                ShowToast(L("Native DoH requires Windows 11.", "رمزنگاری بومی DoH فقط در ویندوز ۱۱ پشتیبانی می‌شود."), isError: true);
+                return;
+            }
+
+            ToggleNativeDoh.IsEnabled = false;
+            _settings = _settings with { EnableNativeDoH = target };
+            _service.SaveSettings(_settings);
+
+            await RunSafeAsync(async () =>
+            {
+                var res = await _service.ToggleNativeDohOnActiveDnsAsync(_selectedAdapter, target);
+                ShowToast(L(res.MessageEn, res.MessageFa), isError: !res.Success);
+            }, "NativeDoH");
+
+            if (!_isClosing)
+                ToggleNativeDoh.IsEnabled = true;
+        }
+
+        private async void BtnStabilityCheck_Click(object sender, RoutedEventArgs e)
+        {
+            BtnStabilityCheck.IsEnabled = false;
+            StabilityCheckProgress.Visibility = Visibility.Visible;
+            TxtStabilityBadge.Text = "...";
+            TxtStabilityResult.Text = L("Probing Modem & Internet stability (~4s)...", "در حال تست پایداری مودم و اینترنت (۴ ثانیه)...");
+
+            await RunSafeAsync(async () =>
+            {
+                var res = await _service.RunStabilityCheckAsync(_selectedAdapter);
+                if (res.Success)
+                {
+                    string netPart = res.GlobalAvgMs.HasValue
+                        ? $"{res.GlobalAvgMs}ms ±{res.GlobalJitterMs ?? 0}ms ({res.GlobalLossPct:0.#}% loss)"
+                        : L("No reply (100% loss)", "بدون پاسخ (۱۰۰٪ پکت‌لاس)");
+
+                    string modemPart = res.RouterAvgMs.HasValue
+                        ? $"Modem {res.RouterAvgMs}ms ({res.RouterLossPct:0.#}%)"
+                        : string.Empty;
+
+                    string statsLine = string.IsNullOrEmpty(modemPart)
+                        ? netPart
+                        : $"{modemPart} · Net {netPart}";
+
+                    TxtStabilityResult.Text = $"{statsLine}{Environment.NewLine}{L(res.VerdictEn, res.VerdictFa)}";
+                    ShowToast(L(res.VerdictEn, res.VerdictFa), isError: res.GlobalLossPct >= 5.0 || (res.RouterLossPct ?? 0) >= 5.0);
+                }
+                else
+                {
+                    TxtStabilityResult.Text = L(res.VerdictEn, res.VerdictFa);
+                    ShowToast(L(res.VerdictEn, res.VerdictFa), isError: true);
+                }
+            }, "StabilityCheck");
+
+            if (!_isClosing)
+            {
+                StabilityCheckProgress.Visibility = Visibility.Collapsed;
+                TxtStabilityBadge.Text = L("Test", "تست");
+                BtnStabilityCheck.IsEnabled = true;
+            }
         }
 
         // ==================== UTILITIES: WINDOWS HOSTS & QUICK TOOLS ====================
@@ -1320,6 +1657,16 @@ namespace AionToolLite
             }
         }
 
+        private void ToggleAutoConnect_Click(object sender, RoutedEventArgs e)
+        {
+            bool enabled = ToggleAutoConnect.IsChecked == true;
+            _settings = _settings with { AutoConnectOnStartup = enabled };
+            _service.SaveSettings(_settings);
+            ShowToast(enabled
+                ? L("Selected DNS will connect automatically on startup.", "هنگام اجرای برنامه، سرور انتخابی به‌صورت خودکار متصل می‌شود.")
+                : L("Auto-connect on startup disabled.", "اتصال خودکار هنگام اجرا غیرفعال شد."));
+        }
+
         private void ToggleMinToTray_Click(object sender, RoutedEventArgs e)
         {
             bool enabled = ToggleMinToTray.IsChecked == true;
@@ -1328,6 +1675,25 @@ namespace AionToolLite
             ShowToast(enabled
                 ? L("Close button will minimize to System Tray.", "دکمه بستن، برنامه را کنار ساعت مخفی می‌کند.")
                 : L("Close button will exit the app completely.", "دکمه بستن، برنامه را کاملاً می‌بندد."));
+        }
+
+        private void ToggleGlobalHotkey_Click(object sender, RoutedEventArgs e)
+        {
+            bool enabled = ToggleGlobalHotkey.IsChecked == true;
+            bool ok = ApplyGlobalHotkeyState(enabled, showErrorToast: true);
+            if (enabled && !ok)
+            {
+                ToggleGlobalHotkey.IsChecked = false;
+                enabled = false;
+            }
+            _settings = _settings with { EnableGlobalHotkey = enabled };
+            _service.SaveSettings(_settings);
+            if (!enabled || ok)
+            {
+                ShowToast(enabled
+                    ? L("Global hotkey Ctrl + Alt + D enabled.", "میانبر سراسری Ctrl + Alt + D فعال شد.")
+                    : L("Global hotkey disabled.", "میانبر صفحه‌کلید غیرفعال شد."));
+            }
         }
 
         private void BuildThemeDots()
@@ -1422,8 +1788,10 @@ namespace AionToolLite
             ChipIran.Content = L("Iran / Game", "ایران و گیم");
             ChipGlobal.Content = L("Global", "جهانی");
             ChipSecurity.Content = L("Ad & Safe", "امن و ضدتبلیغ");
-            LblCustomDnsHeader.Text = L("Custom DNS (Optional)", "دی‌ان‌اس دستی (اختیاری)");
-            BtnApplyCustomDns.Content = L("Apply Custom DNS", "اعمال دی‌ان‌اس دستی");
+            LblCustomDnsHeader.Text = L("Custom DNS (Save up to 5)", "دی‌ان‌اس دستی (ذخیره تا ۵ سرور)");
+            TxtCustomDnsName.ToolTip = L("Custom Server Name (e.g. My Gaming DNS)", "نام دلخواه سرور (مثلاً سرور گیم من)");
+            BtnSaveCustomDns.Content = L("💾 Save Slot", "💾 ذخیره سرور");
+            BtnApplyCustomDns.Content = L("⚡ Apply Now", "⚡ اعمال سریع");
 
             LblBoostTitle.Text = L("Boost & Repair", "تقویت و تعمیر");
             LblBoostSubtitle.Text = L("Simple one-tap tools — safe and reversible", "ابزارهای تک‌کلیکی، کاملاً ایمن و قابل بازگشت");
@@ -1431,6 +1799,8 @@ namespace AionToolLite
             LblGameModeDesc.Text = L("Pauses background Windows clutter while gaming", "سرویس‌های مزاحم پس‌زمینه را حین بازی متوقف می‌کند");
             LblAdShieldTitle.Text = L("Ad & Tracker Shield", "سپر تبلیغات و ردیاب");
             LblAdShieldDesc.Text = L("Blocks ads & trackers across all apps", "مسدودسازی سرورهای تبلیغاتی در کل ویندوز");
+            LblNativeDohTitle.Text = L("Encrypted DNS (Win11 DoH)", "دی‌ان‌اس رمزنگاری‌شده (Win11 DoH)");
+            LblNativeDohDesc.Text = L("Uses native Windows 11 DNS-over-HTTPS on supported servers", "فعال‌سازی رمزنگاری بومی DoH ویندوز ۱۱ روی سرورهای پشتیبانی‌شده");
             LblQuickFixTitle.Text = L("Quick Network Fix", "تازه‌سازی سریع شبکه");
             LblQuickFixDesc.Text = L("Clears DNS cache & refreshes connection", "پاکسازی کش دی‌ان‌اس و رفع گیر کردن اینترنت");
             TxtQuickFixBadge.Text = L("Run", "اجرا");
@@ -1441,6 +1811,13 @@ namespace AionToolLite
             LblSpeedCheckTitle.Text = L("Speed Check", "تست سرعت اینترنت");
             if (TxtSpeedCheckBadge.Text != "...")
                 TxtSpeedCheckBadge.Text = L("Start", "شروع");
+            LblStabilityTitle.Text = L("Stability & Packet Loss", "تست پایداری و پکت‌لاس");
+            if (TxtStabilityBadge.Text != "...")
+            {
+                TxtStabilityBadge.Text = L("Test", "تست");
+                if (TxtStabilityResult.Text.StartsWith("Test Modem") || TxtStabilityResult.Text.StartsWith("تست پکت"))
+                    TxtStabilityResult.Text = L("Test Modem vs Internet loss & jitter (~4s)", "تست پکت‌لاس و نوسان پینگ مودم و اینترنت (۴ ثانیه)");
+            }
 
             LblUtilTitle.Text = L("Utilities & Hosts", "ابزارها و فایل هاست");
             LblUtilSubtitle.Text = L("Windows hosts, blocklists & handy tools", "مدیریت hosts ویندوز، لیست‌های مسدودساز و ابزارها");
@@ -1463,10 +1840,14 @@ namespace AionToolLite
             LblBehaviorSection.Text = L("Startup & System Tray", "شروع خودکار و نوار ساعت");
             LblAutoStartTitle.Text = L("Start with Windows", "شروع خودکار با ویندوز");
             LblAutoStartDesc.Text = L("Launch quietly in Tray on logon", "اجرای بی‌صدا در کنار ساعت هنگام بالا آمدن ویندوز");
+            LblAutoConnectTitle.Text = L("Auto-Connect on Startup", "اتصال خودکار هنگام اجرا");
+            LblAutoConnectDesc.Text = L("Automatically connect selected DNS on launch", "اتصال خودکار به سرور انتخابی به محض باز شدن برنامه");
             LblMinToTrayTitle.Text = L("Minimize to Tray on Close", "مخفی شدن کنار ساعت با دکمه بستن");
             LblMinToTrayDesc.Text = L("Keep quick controls in taskbar corner", "دسترسی سریع به تغییر DNS از کنار ساعت");
+            LblHotkeyTitle.Text = L("Quick Hotkey (Ctrl + Alt + D)", "میانبر سریع (Ctrl + Alt + D)");
+            LblHotkeyDesc.Text = L("Toggle DNS connect/disconnect anywhere", "وصل و قطع سریع DNS در هر صفحه و بازی");
             LblAdapterSection.Text = L("Network Adapter", "کارت شبکه فعال");
-            BtnCheckUpdates.Content = L("🔄 Check for Updates", "🔄 بررسی بروزرسانی");
+            UpdateCheckUpdatesButtonLabel();
             BtnResetAll.Content = L("↺ Restore Original DNS & Defaults", "↺ بازگردانی DNS قبلی و پیش‌فرض‌ها");
 
             BtnLangEn.BorderBrush = !fa ? (Brush)FindResource("AccentBrush") : (Brush)FindResource("BorderBrushSoft");
@@ -1543,7 +1924,7 @@ namespace AionToolLite
             if (!_isClosing)
             {
                 BtnCheckUpdates.IsEnabled = true;
-                BtnCheckUpdates.Content = L("🔄 Check for Updates", "🔄 بررسی بروزرسانی");
+                UpdateCheckUpdatesButtonLabel();
             }
         }
 
@@ -1576,7 +1957,7 @@ namespace AionToolLite
 
                 ToggleAdShield.IsChecked = false;
                 ToggleGameMode.IsChecked = false;
-                _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter);
+                _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter, SavedCustomEntries);
                 SetOrbState(_activeDns.IsStaticConnected ? OrbVisualState.Connected : OrbVisualState.Idle);
                 UpdateSelectedDnsHomeCard();
                 RebuildDnsCards();
@@ -1593,7 +1974,7 @@ namespace AionToolLite
         private async Task SyncActiveDnsFromSystemAsync()
         {
             if (_isBusy || _isClosing) return;
-            var detected = await _service.DetectActiveStaticDnsAsync(_selectedAdapter);
+            var detected = await _service.DetectActiveStaticDnsAsync(_selectedAdapter, SavedCustomEntries);
             ApplyDetectedDnsState(detected);
         }
 
@@ -1630,7 +2011,7 @@ namespace AionToolLite
             _isTelemetryTickRunning = true;
             try
             {
-                var snap = await _service.CaptureTelemetryAsync(_selectedAdapter);
+                var snap = await _service.CaptureTelemetryAsync(_selectedAdapter, SavedCustomEntries);
                 if (_isClosing) return;
 
                 _lastTelemetry = snap;

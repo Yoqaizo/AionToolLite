@@ -12,7 +12,8 @@ namespace AionToolLite.Models
         Auto,
         IranGame,
         Global,
-        Security
+        Security,
+        Custom
     }
 
     public enum AdapterHealth
@@ -73,9 +74,29 @@ namespace AionToolLite.Models
         string TaglineFa,
         string BadgeHex,
         string? PrimaryIpv6 = null,
-        string? SecondaryIpv6 = null)
+        string? SecondaryIpv6 = null,
+        string? DohTemplate = null)
     {
         public bool IsSmartAuto => Category == DnsCategory.Auto;
+        public bool IsCustom => Category == DnsCategory.Custom;
+        public bool HasDoh => !string.IsNullOrWhiteSpace(DohTemplate);
+    }
+
+    public sealed record SavedCustomDnsEntry(
+        string Id,
+        string Name,
+        string PrimaryIp,
+        string SecondaryIp)
+    {
+        public LiteDnsPreset ToPreset() => new(
+            Id,
+            Name,
+            PrimaryIp,
+            SecondaryIp,
+            DnsCategory.Custom,
+            "Saved custom server",
+            "سرور دستی ذخیره‌شده",
+            "#E879F9");
     }
 
     public sealed record ActiveDnsStatus(
@@ -95,6 +116,18 @@ namespace AionToolLite.Models
         string PrimaryIp,
         string SecondaryIp,
         string SavedAtUtc);
+
+    public sealed record StabilityCheckResult(
+        bool Success,
+        int SentCount,
+        double GlobalLossPct,
+        long? GlobalAvgMs,
+        long? GlobalJitterMs,
+        double? RouterLossPct,
+        long? RouterAvgMs,
+        long? RouterJitterMs,
+        string VerdictEn,
+        string VerdictFa);
 
     public sealed record LiteBlocklistItem(
         string Tag,
@@ -133,7 +166,11 @@ namespace AionToolLite.Models
         string CustomDns2 = "1.0.0.1",
         int PingChannel = 0,
         bool MinimizeToTray = true,
-        List<string>? PinnedDnsIds = null);
+        List<string>? PinnedDnsIds = null,
+        bool EnableNativeDoH = false,
+        bool AutoConnectOnStartup = false,
+        bool EnableGlobalHotkey = true,
+        List<SavedCustomDnsEntry>? SavedCustomDns = null);
 
     public sealed record LiteTelemetry(
         bool HasInternet,
@@ -195,7 +232,8 @@ namespace AionToolLite.Models
             new("shecan", "Shecan", "178.22.122.100", "185.51.200.2", DnsCategory.IranGame,
                 "Anti-sanction smart DNS",
                 "عبور از تحریم وب و اپ",
-                "#FB923C"),
+                "#FB923C",
+                DohTemplate: "https://free.shecan.ir/dns-query"),
 
             new("electro", "Electro", "78.157.42.100", "78.157.42.101", DnsCategory.IranGame,
                 "Low-ping gaming & bypass",
@@ -236,27 +274,32 @@ namespace AionToolLite.Models
             new("cloudflare", "Cloudflare", "1.1.1.1", "1.0.0.1", DnsCategory.Global,
                 "Ultra-fast global edge DNS",
                 "سریع‌ترین سرور جهانی",
-                "#38BDF8", "2606:4700:4700::1111", "2606:4700:4700::1001"),
+                "#38BDF8", "2606:4700:4700::1111", "2606:4700:4700::1001",
+                "https://cloudflare-dns.com/dns-query"),
 
             new("google", "Google DNS", "8.8.8.8", "8.8.4.4", DnsCategory.Global,
                 "Reliable worldwide DNS",
                 "پایدار و مطمئن جهانی",
-                "#38BDF8", "2001:4860:4860::8888", "2001:4860:4860::8844"),
+                "#38BDF8", "2001:4860:4860::8888", "2001:4860:4860::8844",
+                "https://dns.google/dns-query"),
 
             new("opendns", "OpenDNS", "208.67.222.222", "208.67.220.220", DnsCategory.Global,
                 "Cisco enterprise recursive DNS",
                 "سرور قدرتمند سیسکو",
-                "#38BDF8", "2620:119:35::35", "2620:119:53::53"),
+                "#38BDF8", "2620:119:35::35", "2620:119:53::53",
+                "https://doh.opendns.com/dns-query"),
 
             new("controld", "ControlD", "76.76.2.0", "76.76.10.0", DnsCategory.Global,
                 "Modern fast anycast DNS",
                 "سرور مدرن با سرعت بالا",
-                "#38BDF8", "2606:1a40::", "2606:1a40:1::"),
+                "#38BDF8", "2606:1a40::", "2606:1a40:1::",
+                "https://freedns.controld.com/p0"),
 
             new("mullvad", "Mullvad DNS", "194.242.2.2", "194.242.2.3", DnsCategory.Global,
                 "Privacy-first zero-log DNS",
                 "حریم خصوصی بالا بدون لاگ",
-                "#38BDF8"),
+                "#38BDF8",
+                DohTemplate: "https://dns.mullvad.net/dns-query"),
 
             new("yandex", "Yandex DNS", "77.88.8.8", "77.88.8.1", DnsCategory.Global,
                 "Fast Eurasia regional DNS",
@@ -271,7 +314,8 @@ namespace AionToolLite.Models
             new("alidns", "AliDNS", "223.5.5.5", "223.6.6.6", DnsCategory.Global,
                 "Alibaba Cloud global DNS",
                 "دی‌ان‌اس جهانی علی‌بابا",
-                "#38BDF8"),
+                "#38BDF8",
+                DohTemplate: "https://dns.alidns.com/dns-query"),
 
             new("114dns", "114DNS", "114.114.114.114", "114.114.115.115", DnsCategory.Global,
                 "Reliable Asian & Pacific DNS",
@@ -282,32 +326,38 @@ namespace AionToolLite.Models
             new("adguard", "AdGuard", "94.140.14.14", "94.140.15.15", DnsCategory.Security,
                 "Blocks ads & trackers",
                 "مسدودکننده تبلیغات و ردیاب",
-                "#FACC15", "2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff"),
+                "#FACC15", "2a10:50c0::ad1:ff", "2a10:50c0::ad2:ff",
+                "https://dns.adguard-dns.com/dns-query"),
 
             new("quad9", "Quad9", "9.9.9.9", "149.112.112.112", DnsCategory.Security,
                 "Swiss malware & phishing shield",
                 "محافظ سوئیسی در برابر بدافزار",
-                "#FACC15", "2620:fe::fe", "2620:fe::9"),
+                "#FACC15", "2620:fe::fe", "2620:fe::9",
+                "https://dns.quad9.net/dns-query"),
 
             new("cf_security", "Cloudflare Safe", "1.1.1.2", "1.0.0.2", DnsCategory.Security,
                 "Fast DNS + malware blocking",
                 "کلودفلر پرسرعت + مسدودساز بدافزار",
-                "#FACC15", "2606:4700:4700::1112", "2606:4700:4700::1002"),
+                "#FACC15", "2606:4700:4700::1112", "2606:4700:4700::1002",
+                "https://security.cloudflare-dns.com/dns-query"),
 
             new("cf_family", "Cloudflare Family", "1.1.1.3", "1.0.0.3", DnsCategory.Security,
                 "Blocks malware & adult sites",
                 "سپر خانواده (بدافزار + محتوای نامناسب)",
-                "#FACC15", "2606:4700:4700::1113", "2606:4700:4700::1003"),
+                "#FACC15", "2606:4700:4700::1113", "2606:4700:4700::1003",
+                "https://family.cloudflare-dns.com/dns-query"),
 
             new("cleanbrowsing", "CleanBrowsing", "185.228.168.9", "185.228.169.9", DnsCategory.Security,
                 "Blocks malicious & phishing domains",
                 "فیلتر امنیتی سایت‌های مخرب",
-                "#FACC15"),
+                "#FACC15",
+                DohTemplate: "https://doh.cleanbrowsing.org/doh/security-filter/"),
 
             new("dns0eu", "dns0.eu", "193.110.81.0", "185.253.5.0", DnsCategory.Security,
                 "European privacy & threat shield",
                 "دی‌ان‌اس امن و حریم خصوصی اروپا",
-                "#FACC15"),
+                "#FACC15",
+                DohTemplate: "https://dns0.eu/"),
 
             new("comodo", "Comodo Secure", "8.26.56.26", "8.20.247.20", DnsCategory.Security,
                 "Cloud malware & web protection",

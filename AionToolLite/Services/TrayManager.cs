@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using AionToolLite.Models;
 
@@ -8,9 +11,13 @@ namespace AionToolLite.Services
 {
     public sealed class TrayManager : IDisposable
     {
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool DestroyIcon(IntPtr hIcon);
+
         private readonly NotifyIcon _notifyIcon;
         private readonly ContextMenuStrip _menu;
         private readonly Icon? _appIcon;
+        private readonly Icon? _connectedIcon;
         private readonly Font _boldFont;
         private bool _disposed;
 
@@ -22,6 +29,8 @@ namespace AionToolLite.Services
         public TrayManager()
         {
             _appIcon = LoadEmbeddedIcon();
+            _connectedIcon = CreateConnectedBadgeIcon(_appIcon ?? SystemIcons.Shield);
+
             _menu = new ContextMenuStrip
             {
                 ShowImageMargin = false,
@@ -73,6 +82,45 @@ namespace AionToolLite.Services
             return null;
         }
 
+        private static Icon? CreateConnectedBadgeIcon(Icon baseIcon)
+        {
+            try
+            {
+                using var bmp = new Bitmap(32, 32, PixelFormat.Format32bppArgb);
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.Clear(Color.Transparent);
+                    using var icon32 = new Icon(baseIcon, 32, 32);
+                    g.DrawIcon(icon32, new Rectangle(0, 0, 32, 32));
+
+                    using var outlineBrush = new SolidBrush(Color.FromArgb(13, 9, 26));
+                    using var dotBrush = new SolidBrush(Color.FromArgb(16, 185, 129));
+                    using var highlightBrush = new SolidBrush(Color.FromArgb(167, 243, 208));
+
+                    g.FillEllipse(outlineBrush, 17, 17, 14, 14);
+                    g.FillEllipse(dotBrush, 19, 19, 10, 10);
+                    g.FillEllipse(highlightBrush, 21, 21, 3, 3);
+                }
+
+                IntPtr hIcon = bmp.GetHicon();
+                try
+                {
+                    using var tmp = Icon.FromHandle(hIcon);
+                    return (Icon)tmp.Clone();
+                }
+                finally
+                {
+                    DestroyIcon(hIcon);
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private void ClearMenuItemsSafely()
         {
             while (_menu.Items.Count > 0)
@@ -91,6 +139,10 @@ namespace AionToolLite.Services
             IReadOnlyList<LiteDnsPreset> quickPresets)
         {
             if (_disposed) return;
+
+            _notifyIcon.Icon = isConnected
+                ? (_connectedIcon ?? _appIcon ?? SystemIcons.Shield)
+                : (_appIcon ?? SystemIcons.Shield);
 
             string tooltip = isConnected
                 ? $"AionToolLite — {(isFa ? "متصل" : "Connected")}: {activeLabel}"
@@ -165,6 +217,7 @@ namespace AionToolLite.Services
                 ClearMenuItemsSafely();
                 _menu.Dispose();
                 _boldFont.Dispose();
+                _connectedIcon?.Dispose();
                 _appIcon?.Dispose();
             }
             catch { }
