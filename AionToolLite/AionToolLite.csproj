@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <NoWarn>$(NoWarn);WFAC010</NoWarn>
+    <ApplicationIcon>AionToolp.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>AionToolLite</AssemblyName>
+    <RootNamespace>AionToolLite</RootNamespace>
+    <Version>1.2.2</Version>
+    <AssemblyVersion>1.2.2.0</AssemblyVersion>
+    <FileVersion>1.2.2.0</FileVersion>
+    <Authors>Yoqaizo</Authors>
+    <Product>AionToolLite</Product>
+    <Copyright>Copyright (c) 2026 Yoqaizo — Licensed under GNU GPL v3.0</Copyright>
+    <Description>AionToolLite — Hardened One-Tap DNS, Hosts &amp; Network Companion</Description>
+    <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/Yoqaizo/AionToolLite</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <TieredCompilation>true</TieredCompilation>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="AionToolp.ico" />
+    <Resource Include="AionToolp.png" />
+  </ItemGroup>
+
+</Project>
