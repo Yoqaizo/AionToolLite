@@ -1,9 +1,9 @@
 @echo off
 chcp 65001 >nul
-title AionToolLite 1.2.2 - Builder
+title AionToolLite 1.2.3 - Builder
 cd /d "%~dp0"
 echo ==========================================================
-echo   Compiling AionToolLite 1.2.2...
+echo   Compiling AionToolLite 1.2.3...
 echo ==========================================================
 dotnet build "AionToolLite\AionToolLite.csproj" -c Release --no-incremental
 if errorlevel 1 (

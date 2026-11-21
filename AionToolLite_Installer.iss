@@ -1,6 +1,6 @@
 ; Inno Setup Script for AionToolLite (Compatible with Inno Setup 6 and 7)
 #ifndef AppVer
-  #define AppVer "1.2.2"
+  #define AppVer "1.2.3"
 #endif
 
 [Setup]
@@ -49,4 +49,5 @@ Type: filesandordirs; Name: "{userappdata}\AionToolLite"
 Type: filesandordirs; Name: "{commonappdata}\AionToolLite"
 
 [Run]
-Filename: "{app}\AionToolLite.exe"; Description: "Launch AionToolLite"; Flags: nowait postinstall
+; runascurrentuser + shellexec prevents CreateProcess error 740 on elevated exe and works smoothly in silent auto-updates
+Filename: "{app}\AionToolLite.exe"; Description: "Launch AionToolLite"; Flags: nowait postinstall runascurrentuser shellexec

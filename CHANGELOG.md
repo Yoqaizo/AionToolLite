@@ -2,6 +2,13 @@
 
 All notable changes to **AionToolLite** are documented in this file.
 
+## [1.2.3] - 2026-11-21
+### Fixed
+- Fixed Inno Setup `CreateProcess failed; code 740` on finish/launch by adding `runascurrentuser shellexec` to `[Run]` in `AionToolLite_Installer.iss`.
+- Fixed Minimize-to-Tray intercepting external `WM_CLOSE` requests from Inno Setup upgrades and Windows shutdown (`SessionEnding` hook + direct `HideToTray` on `✕` click).
+- Fixed silent auto-updater `timeout.exe` non-console exit by switching to System32 `ping.exe` + `taskkill.exe` with outer-quoted `cmd.exe /c`.
+- Enhanced `Scripts/Release-Manager.ps1` to cleanly attach to existing GitHub `origin/main` commit history when run from a freshly extracted folder.
+
 ## [1.2.2] - 2026-11-21
 ### Changed
 - Rewrote `ScanAdaptersAsync` with a **Physical-First** hardware scanner using Windows Registry `NCF_PHYSICAL` flags and MAC/IPv4 checks to hide virtual, WSL, VM, and VPN/TUN adapters.

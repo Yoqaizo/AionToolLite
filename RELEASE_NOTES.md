@@ -1,20 +1,18 @@
-## What's New in AionToolLite v1.2.2
+## What's New in AionToolLite v1.2.3 (Hotfix)
 
-A sleek, hardened, one-tap Windows DNS, Hosts & Network Companion — now with smart physical adapter filtering, 25 verified DNS servers, System Tray controls, and verified silent updates.
+This hotfix resolves the installer post-install launch error (`CreateProcess failed; code 740`) and improves silent auto-update and upgrade reliability.
 
-### Highlights
-* **Physical-First Network Adapter Scanner:** Reads Windows hardware registry flags (`NCF_PHYSICAL`) to display only real Ethernet / Wi-Fi / WWAN adapters and cleanly hide VPN tunnels (`Wintun`, `WireGuard`, `Sing-box`, `OpenVPN`, `WARP`, `Tailscale`), `VMware`, `WSL`, and virtual adapters. Hovering any adapter shows its exact hardware name.
-* **Expanded DNS Catalog (25 Servers + Smart Auto):** Added Shatel, HostIran, OpenDNS, Mullvad, Yandex, Level3, AliDNS, 114DNS, Cloudflare Safe (`1.1.1.2`), Cloudflare Family (`1.1.1.3`), CleanBrowsing, dns0.eu, Comodo Secure, and Alternate DNS — all benchmarked via real UDP/53 queries.
-* **System Tray & Start with Windows:** Minimize to the Windows System Tray with a dark right-click menu (Quick Connect/Disconnect, Switch DNS, Open, Exit) and optional elevated **Start with Windows** (`--minimized`, zero UAC prompts).
-* **One-Tap Fastest Banner & Favorite Pins:** Pin your favorite DNS servers (`★`) to the top of the list and Tray menu, and connect directly to the benchmark winner in one click.
-* **Automatic DNS Detection & Clean Disconnect:** Automatically detects your active Windows static DNS even after closing and reopening the app, backs up your original DNS before first change, and performs an instant native + OS cache flush on disconnect.
-* **Cybersecurity Hardening:** Admin-locked `%ProgramData%` update staging with `SHA256` checksum verification (`checksums.txt`), strict TLS 1.2/1.3 & GitHub HTTPS redirect enforcement, `ReparsePoint`/symlink protection across hosts & temp cleaner, and strict service allowlisting.
+### Fixes
+* **Fixed Installer Launch Error (`code 740`):** Updated Inno Setup `[Run]` launch flags to `nowait postinstall runascurrentuser shellexec` so `AionToolLite.exe` launches smoothly with administrator privileges right after installation and after silent updates without triggering `CreateProcess failed; code 740`.
+* **Improved Upgrade & Shutdown Closing:** Only the in-app `✕` button minimizes to the System Tray; external close signals (such as Inno Setup Restart Manager during upgrades or Windows shutdown) now exit the app cleanly without leaving file locks.
+* **Hardened Silent Auto-Updater Wait Logic:** Replaced `timeout.exe` (which fails in non-console GUI contexts) with System32 `ping.exe` + `taskkill.exe` and safe outer quoting so silent in-app updates cleanly close the old instance, install the new version, and relaunch automatically.
+* **Smarter Release Script (`Publish-GitHub-Release.bat`):** Automatically syncs with existing `origin/main` history even when run from a freshly extracted folder.
 
 ### Installation & Verification
-1. Download **`AionToolLite_Setup_v1.2.2.exe`** below and run it.
+1. Download **`AionToolLite_Setup_v1.2.3.exe`** below and run it.
 2. *(Optional)* Verify integrity against **`checksums.txt`** using PowerShell:
    ```powershell
-   Get-FileHash .\AionToolLite_Setup_v1.2.2.exe -Algorithm SHA256
+   Get-FileHash .\AionToolLite_Setup_v1.2.3.exe -Algorithm SHA256
    ```
 
-> **Note:** Existing installations can update silently in one click from **Settings → Check for Updates**.
+> **Tip:** Users on `v1.2.2` can also update directly from **Settings → Check for Updates**.

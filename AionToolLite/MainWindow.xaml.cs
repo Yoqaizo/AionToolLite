@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
 using System.Net.NetworkInformation;
@@ -50,7 +49,6 @@ namespace AionToolLite
         private bool _isReady;
         private bool _isBusy;
         private bool _isClosing;
-        private bool _forceExit;
         private bool _shownTrayTipOnce;
         private bool _isTelemetryTickRunning;
 
@@ -171,7 +169,6 @@ namespace AionToolLite
 
         private void ExitApplicationCompletely()
         {
-            _forceExit = true;
             Close();
             Application.Current?.Shutdown();
         }
@@ -295,7 +292,7 @@ namespace AionToolLite
                 ComboHostsBlocklist.SelectedIndex = 0;
 
                 var asmVer = Assembly.GetExecutingAssembly().GetName().Version;
-                string verLabel = asmVer != null ? $"{asmVer.Major}.{asmVer.Minor}.{Math.Max(0, asmVer.Build)}" : "1.2.2";
+                string verLabel = asmVer != null ? $"{asmVer.Major}.{asmVer.Minor}.{Math.Max(0, asmVer.Build)}" : "1.2.3";
                 TxtAppFooterVersion.Text = $"AionToolLite v{verLabel}  ·  Created by Yoqaizo";
 
                 LiteThemeManager.Apply(_currentTheme);
@@ -334,17 +331,6 @@ namespace AionToolLite
                 _telemetryTimer.Start();
                 await RefreshTelemetryAsync();
             }, "Startup");
-        }
-
-        protected override void OnClosing(CancelEventArgs e)
-        {
-            if (!_forceExit && _settings.MinimizeToTray && _tray != null)
-            {
-                e.Cancel = true;
-                HideToTray();
-                return;
-            }
-            base.OnClosing(e);
         }
 
         protected override void OnClosed(EventArgs e)
@@ -507,7 +493,15 @@ namespace AionToolLite
         }
 
         private void BtnMinimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
-        private void BtnClose_Click(object sender, RoutedEventArgs e) => Close();
+        private void BtnClose_Click(object sender, RoutedEventArgs e)
+        {
+            if (_settings.MinimizeToTray && _tray != null)
+            {
+                HideToTray();
+                return;
+            }
+            ExitApplicationCompletely();
+        }
 
         private async void BottomNav_Checked(object sender, RoutedEventArgs e)
         {

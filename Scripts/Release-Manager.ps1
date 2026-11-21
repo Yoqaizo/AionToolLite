@@ -240,7 +240,8 @@ Write-Ok "SHA256: $HashHex"
 # ==================== 6. GIT INIT / COMMIT / PUSH ====================
 Write-Step "Syncing Source Code to GitHub ($RepoOwner/$RepoName)"
 
-if (-not (Test-Path -LiteralPath (Join-Path $RootDir ".git"))) {
+$IsFreshGitRepo = -not (Test-Path -LiteralPath (Join-Path $RootDir ".git"))
+if ($IsFreshGitRepo) {
     & git init
     if ($LASTEXITCODE -ne 0) {
         Write-Err "git init failed."
@@ -268,7 +269,8 @@ if ($remotes -notcontains "origin") {
 
 # Create public repository automatically if it does not exist yet
 $null = & gh repo view "$RepoOwner/$RepoName" 2>&1
-if ($LASTEXITCODE -ne 0) {
+$RepoAlreadyExisted = ($LASTEXITCODE -eq 0)
+if (-not $RepoAlreadyExisted) {
     Write-Warn "Repository $RepoOwner/$RepoName does not exist yet. Creating public repository..."
     & gh repo create "$RepoOwner/$RepoName" --public --description "A sleek, hardened, one-tap Windows DNS, Hosts and Network Companion (.NET 8 WPF)"
     if ($LASTEXITCODE -ne 0) {
@@ -276,6 +278,16 @@ if ($LASTEXITCODE -ne 0) {
         exit 1
     }
     Write-Ok "Created public GitHub repository: https://github.com/$RepoOwner/$RepoName"
+} elseif ($IsFreshGitRepo) {
+    # If extracted into a fresh folder while GitHub already has commits, attach cleanly onto origin/main without losing files
+    Write-Warn "Existing GitHub repository detected from a fresh folder. Syncing commit history..."
+    $null = & git fetch origin main 2>&1
+    $null = & git rev-parse --verify refs/remotes/origin/main 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        & git symbolic-ref HEAD refs/heads/main
+        & git update-ref refs/heads/main refs/remotes/origin/main
+        Write-Ok "Attached cleanly to existing origin/main history."
+    }
 }
 
 & git add -A

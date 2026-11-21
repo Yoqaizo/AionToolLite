@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title AionToolLite 1.2.2 - Launcher
+title AionToolLite 1.2.3 - Launcher
 
 fltmc >nul 2>&1
 if errorlevel 1 (
@@ -11,7 +11,7 @@ if errorlevel 1 (
 
 cd /d "%~dp0"
 echo ==========================================================
-echo   Launching AionToolLite 1.2.2...
+echo   Launching AionToolLite 1.2.3...
 echo ==========================================================
 dotnet run --project "AionToolLite\AionToolLite.csproj" -c Release
 if errorlevel 1 (

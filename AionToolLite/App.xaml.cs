@@ -40,6 +40,7 @@ namespace AionToolLite
             DispatcherUnhandledException += OnDispatcherUnhandledException;
             TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
             AppDomain.CurrentDomain.UnhandledException += OnCurrentDomainUnhandledException;
+            SessionEnding += (_, _) => Shutdown();
 
             try
             {

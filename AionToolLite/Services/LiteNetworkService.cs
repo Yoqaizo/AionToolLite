@@ -97,7 +97,7 @@ namespace AionToolLite.Services
             };
             var c = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(45) };
             var v = Assembly.GetExecutingAssembly().GetName().Version;
-            string uaVer = v != null ? $"{v.Major}.{v.Minor}.{Math.Max(0, v.Build)}" : "1.2.2";
+            string uaVer = v != null ? $"{v.Major}.{v.Minor}.{Math.Max(0, v.Build)}" : "1.2.3";
             c.DefaultRequestHeaders.UserAgent.ParseAdd($"AionToolLite/{uaVer}");
             return c;
         }
@@ -1645,7 +1645,7 @@ namespace AionToolLite.Services
             string? stagedExe = null;
             try
             {
-                var rawVer = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 2, 2);
+                var rawVer = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 2, 3);
                 var currentVer = new Version(Math.Max(0, rawVer.Major), Math.Max(0, rawVer.Minor), Math.Max(0, rawVer.Build));
 
                 using var req = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{owner}/{repo}/releases/latest");
@@ -1780,8 +1780,19 @@ namespace AionToolLite.Services
                 }
 
                 string cmdPath = _runner.ResolveSystemExecutable("cmd.exe");
-                string args = $"/c timeout /t 3 /nobreak > NUL & \"{stagedExe}\" /VERYSILENT /SUPPRESSMSGBOXES /FORCECLOSEAPPLICATIONS /NORESTART & del /f /q \"{stagedExe}\" > NUL 2>&1";
-                Process.Start(new ProcessStartInfo { FileName = cmdPath, Arguments = args, UseShellExecute = false, CreateNoWindow = true });
+                string pingPath = _runner.ResolveSystemExecutable("ping.exe");
+                string taskkillPath = _runner.ResolveSystemExecutable("taskkill.exe");
+
+                // Use ping.exe instead of timeout.exe (timeout fails immediately in non-console GUI apps)
+                // Wrap inner command in outer quotes so cmd.exe /c strips only the outer pair safely
+                string innerCmd = $"\"{pingPath}\" -n 3 127.0.0.1 > NUL & \"{taskkillPath}\" /F /IM AionToolLite.exe > NUL 2>&1 & \"{pingPath}\" -n 2 127.0.0.1 > NUL & \"{stagedExe}\" /VERYSILENT /SUPPRESSMSGBOXES /FORCECLOSEAPPLICATIONS /NORESTART & del /f /q \"{stagedExe}\" > NUL 2>&1";
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = cmdPath,
+                    Arguments = $"/c \"{innerCmd}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                });
 
                 return new OperationResult(true, "READY_TO_UPDATE", "READY_TO_UPDATE");
             }
