@@ -97,7 +97,7 @@ namespace AionToolLite.Services
             };
             var c = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(45) };
             var v = Assembly.GetExecutingAssembly().GetName().Version;
-            string uaVer = v != null ? $"{v.Major}.{v.Minor}.{Math.Max(0, v.Build)}" : "1.2.4";
+            string uaVer = v != null ? $"{v.Major}.{v.Minor}.{Math.Max(0, v.Build)}" : "1.0.0";
             c.DefaultRequestHeaders.UserAgent.ParseAdd($"AionToolLite/{uaVer}");
             return c;
         }
@@ -1647,7 +1647,7 @@ namespace AionToolLite.Services
             string? stagedExe = null;
             try
             {
-                var rawVer = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 2, 4);
+                var rawVer = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 0, 0);
                 var currentVer = new Version(Math.Max(0, rawVer.Major), Math.Max(0, rawVer.Minor), Math.Max(0, rawVer.Build));
 
                 using var req = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{owner}/{repo}/releases/latest");

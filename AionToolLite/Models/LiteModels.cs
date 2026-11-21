@@ -333,19 +333,22 @@ namespace AionToolLite.Models
 
         public static IReadOnlyList<LiteTheme> Themes { get; } = new List<LiteTheme>
         {
-            new(1, "Cosmic Blurple", "بنفش کیهانی",
+            new(1, "Aion Lavender", "یاسی آیون",
+                "#B57BFF", "#67E8F9", "#0D091A", "#160F2E", "#1E153D", "#291D52", "#120C26", "#3B2B6E"),
+
+            new(2, "Cosmic Blurple", "بنفش کیهانی",
                 "#6366F1", "#38BDF8", "#0B0E17", "#111626", "#161C2E", "#1F2842", "#0E1220", "#26314D"),
 
-            new(2, "Emerald Pulse", "زمردی نئون",
+            new(3, "Emerald Pulse", "زمردی نئون",
                 "#10B981", "#34D399", "#06120E", "#0B1F18", "#102820", "#17382D", "#081712", "#1F473A"),
 
-            new(3, "Crimson Glow", "قرمز یاقوتی",
+            new(4, "Crimson Glow", "قرمز یاقوتی",
                 "#F43F5E", "#FB7185", "#14080C", "#1F0D14", "#29121B", "#381825", "#190A10", "#4A2131"),
 
-            new(4, "Ocean Cyber", "آبی اقیانوسی",
+            new(5, "Ocean Cyber", "آبی اقیانوسی",
                 "#06B6D4", "#818CF8", "#060F17", "#0B1B29", "#102436", "#17324A", "#08141F", "#1E3F5C"),
 
-            new(5, "Clean Daylight", "روشن روز",
+            new(6, "Clean Daylight", "روشن روز",
                 "#4F46E5", "#0EA5E9", "#F1F5F9", "#E2E8F0", "#FFFFFF", "#F8FAFC", "#F1F5F9", "#CBD5E1", IsLight: true)
         };
     }

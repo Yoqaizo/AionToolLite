@@ -4,6 +4,11 @@ obj/
 Installer/
 publish/
 
+# Local helper & release automation scripts (kept local only, never uploaded to GitHub)
+*.bat
+Scripts/
+RELEASE_NOTES.md
+
 # Visual Studio / IDE files
 .vs/
 .vscode/

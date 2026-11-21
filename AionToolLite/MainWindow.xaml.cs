@@ -299,7 +299,7 @@ namespace AionToolLite
                 ComboHostsBlocklist.SelectedIndex = 0;
 
                 var asmVer = Assembly.GetExecutingAssembly().GetName().Version;
-                string verLabel = asmVer != null ? $"{asmVer.Major}.{asmVer.Minor}.{Math.Max(0, asmVer.Build)}" : "1.2.4";
+                string verLabel = asmVer != null ? $"{asmVer.Major}.{asmVer.Minor}.{Math.Max(0, asmVer.Build)}" : "1.0.0";
                 TxtAppFooterVersion.Text = $"AionToolLite v{verLabel}  ·  Created by Yoqaizo";
 
                 LiteThemeManager.Apply(_currentTheme);
@@ -1350,7 +1350,7 @@ namespace AionToolLite
                     BorderBrush = active ? Brushes.White : Brushes.Transparent,
                     BorderThickness = new Thickness(active ? 2.5 : 0),
                     Cursor = Cursors.Hand,
-                    Margin = new Thickness(0, 0, 10, 0),
+                    Margin = new Thickness(0, 0, 9, 4),
                     ToolTip = L(theme.NameEn, theme.NameFa),
                     Tag = theme
                 };

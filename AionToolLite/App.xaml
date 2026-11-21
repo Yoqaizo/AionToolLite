@@ -4,26 +4,26 @@
              StartupUri="MainWindow.xaml">
     <Application.Resources>
         <!-- ==================== DYNAMIC THEME BRUSHES ==================== -->
-        <SolidColorBrush x:Key="BgTopBrush" Color="#0B0E17"/>
-        <SolidColorBrush x:Key="BgBottomBrush" Color="#111626"/>
-        <SolidColorBrush x:Key="CardBrush" Color="#161C2E"/>
-        <SolidColorBrush x:Key="CardHoverBrush" Color="#1F2842"/>
-        <SolidColorBrush x:Key="SurfaceSoftBrush" Color="#0E1220"/>
-        <SolidColorBrush x:Key="BorderBrushSoft" Color="#26314D"/>
+        <SolidColorBrush x:Key="BgTopBrush" Color="#0D091A"/>
+        <SolidColorBrush x:Key="BgBottomBrush" Color="#160F2E"/>
+        <SolidColorBrush x:Key="CardBrush" Color="#1E153D"/>
+        <SolidColorBrush x:Key="CardHoverBrush" Color="#291D52"/>
+        <SolidColorBrush x:Key="SurfaceSoftBrush" Color="#120C26"/>
+        <SolidColorBrush x:Key="BorderBrushSoft" Color="#3B2B6E"/>
         <SolidColorBrush x:Key="PrimaryTextBrush" Color="#F8FAFC"/>
-        <SolidColorBrush x:Key="MutedTextBrush" Color="#94A3B8"/>
-        <SolidColorBrush x:Key="AccentBrush" Color="#6366F1"/>
-        <SolidColorBrush x:Key="SecondaryAccentBrush" Color="#38BDF8"/>
-        <SolidColorBrush x:Key="AccentSoftBrush" Color="#2A6366F1"/>
+        <SolidColorBrush x:Key="MutedTextBrush" Color="#A59EC2"/>
+        <SolidColorBrush x:Key="AccentBrush" Color="#B57BFF"/>
+        <SolidColorBrush x:Key="SecondaryAccentBrush" Color="#67E8F9"/>
+        <SolidColorBrush x:Key="AccentSoftBrush" Color="#2AB57BFF"/>
 
         <LinearGradientBrush x:Key="AccentGradientBrush" StartPoint="0,0" EndPoint="1,1">
-            <GradientStop Color="#6366F1" Offset="0"/>
-            <GradientStop Color="#38BDF8" Offset="1"/>
+            <GradientStop Color="#B57BFF" Offset="0"/>
+            <GradientStop Color="#67E8F9" Offset="1"/>
         </LinearGradientBrush>
 
         <LinearGradientBrush x:Key="ShellBackgroundBrush" StartPoint="0,0" EndPoint="0,1">
-            <GradientStop Color="#0B0E17" Offset="0"/>
-            <GradientStop Color="#111626" Offset="1"/>
+            <GradientStop Color="#0D091A" Offset="0"/>
+            <GradientStop Color="#160F2E" Offset="1"/>
         </LinearGradientBrush>
 
         <!-- ==================== ULTRA-THIN MODERN SCROLLBAR ==================== -->

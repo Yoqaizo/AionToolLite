@@ -1,6 +1,6 @@
 ; Inno Setup Script for AionToolLite (Compatible with Inno Setup 6 and 7)
 #ifndef AppVer
-  #define AppVer "1.2.4"
+  #define AppVer "1.0.0"
 #endif
 
 [Setup]
