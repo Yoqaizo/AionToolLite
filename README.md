@@ -27,40 +27,44 @@
 
 ## Overview
 
-**AionToolLite** brings the essential power of **AionToolPro** into a compact, mobile-inspired vertical desktop app (`424 × 744`) crafted to be effortless for everyone. No terminal commands, no cluttered menus — just one animated button to connect to the fastest DNS, enable native Windows 11 DoH encryption, block ads system-wide, check line stability, or repair your network in seconds.
+**AionToolLite** brings the core networking tools of **AionToolPro** into a compact vertical desktop companion (`424 × 744`, auto-fitting shorter/DPI-scaled displays). Connect to a DNS server with one click, toggle native Windows 11 DNS-over-HTTPS, check modem vs. internet packet loss and jitter, manage Windows `hosts`, or restart a stuck adapter safely.
 
 ## Key Features
 
 | Module | What It Does |
 | :--- | :--- |
-| **One-Tap Power Orb** | Animated connect/disconnect centerpiece with sonar pulse, automatic detection of active Windows DNS across restarts, and instant native cache flush (`DnsFlushResolverCache` + `ipconfig /flushdns`). |
-| **25 Verified DNS Servers + 5 Custom Slots** | Real RFC 1035 **UDP/53** latency benchmark, **Smart Auto**, one-tap **Connect to Fastest** banner, star-pinned favorites (`★`), and up to **5 named Saved Custom DNS** slots. |
-| **Native Windows 11 DoH Encryption** | One-tap native **DNS-over-HTTPS** (`netsh dns add encryption` with automatic UDP fallback) for supported resolvers including Cloudflare, Google, Quad9, AdGuard, OpenDNS, ControlD, Mullvad, CleanBrowsing, dns0.eu, AliDNS, and Shecan. |
-| **Clickable 3-Mode Live Ping** | Tap the ping card on Home to smoothly cycle between **Global (`4.2.2.4`)**, **Local Iran (`ArvanCloud`)**, and **PC-to-Modem Gateway** latency alongside live download/upload speeds. |
-| **Physical-First Adapter Scanner** | Uses Windows Registry hardware flags (`NCF_PHYSICAL`) to display only real Ethernet/Wi-Fi adapters — filtering out VPN tunnels (`Wintun`, `WireGuard`, `Sing-box`, `OpenVPN`), `VMware`, `WSL`, and virtual adapters. |
-| **Boost, Stability & Network Repair** | **Game Mode**, **Ad & Tracker Shield**, **Quick Fix**, **Full Adapter Reset**, 6-second **Speed Check**, and a 4-second **Stability & Packet Loss / Jitter Check** comparing Modem vs Internet. |
-| **Windows Hosts Manager** | Atomic, backup-protected management of Windows `hosts` including built-in **TeamSpeak Custom Fix**, **StevenBlack**, **Peter Lowe**, and **Dan Pollock** blocklists, plus Backup, Restore, Notepad, and Default reset. |
-| **System Tray, Auto-Connect & Global Hotkey** | Live emerald status dot on the Tray icon when connected, dark right-click quick-switch menu, **Start with Windows**, **Auto-Connect on Startup**, silent GitHub **Update Badge**, and global **`Ctrl + Alt + D`** toggle hotkey. |
-| **Bilingual & 6 Animated Themes** | Instant **English / فارسی (Persian)** switching and 6 smooth-transition themes led by the signature **Aion Lavender** palette. |
+| **One-Tap Power Orb** | Animated connect/disconnect control that backs up your original IPv4 (including `127.0.0.1` local resolvers) and IPv6 DNS on first change, restores them cleanly on disconnect, and flushes the Windows DNS cache. |
+| **25 DNS Presets + 5 Custom Slots** | Real RFC 1035 **UDP/53** latency benchmark, **Smart Auto** (strictly limited to 6 neutral, unfiltered global resolvers), one-tap **Connect to Fastest**, `★` pinned favorites, and up to **5 named Saved Custom DNS** slots. |
+| **Native Windows 11 DoH Encryption** | One-tap native **DNS-over-HTTPS** (`netsh dns add encryption` with `udpfallback=yes`) on supported resolvers, plus IPv6 DNS leak warnings when an IPv4-only preset is active alongside router IPv6 DNS. |
+| **Clickable 3-Mode Live Ping** | Cycle between **Global (`4.2.2.4`)**, **Regional Edge** (`1.1.1.1` in English / `ArvanCloud` in Persian), and **Modem Gateway** latency alongside live adapter download/upload rates. |
+| **Physical-First Adapter Scanner** | Uses Windows Registry hardware flags (`NCF_PHYSICAL`) across all Windows display languages (including disabled physical NICs) while filtering out VPN tunnels (`Wintun`, `WireGuard`, `Sing-box`, `OpenVPN`), `VMware`, `WSL`, and virtual adapters. |
+| **Boost, Stability & Scoped Adapter Reset** | **Game Mode** (allowlisted 4 services with reboot detection), **Ad & Tracker Shield**, **Quick Fix**, **Scoped Adapter Reset** (restarts only the chosen adapter without wiping global static IPs), 6-second **Speed Check**, and a 4-second **Stability & Packet Loss / Jitter Check** (detecting routers that drop ICMP separately). |
+| **Windows Hosts Manager** | Serialized (`SemaphoreSlim`), fail-closed backup-protected management of Windows `hosts` with lightweight and full blocklists, clean original/manual Restore, Notepad shortcut, and Default reset. |
+| **System Tray, Auto-Connect & Hotkey** | Emerald connection badge on the Tray icon (kept in sync even while minimized), **Start with Windows** via battery-safe XML Task Scheduler, network-ready **Auto-Connect on Startup**, silent GitHub **Update Badge**, and global **`Ctrl + Alt + D`** toggle. |
+| **Clean Uninstall** | The uninstaller automatically restores backed-up original DNS, original `hosts` (or removes all AionTool-managed blocks), and paused Game Mode services before deleting app files. |
 
 ---
 
 ## Built-In DNS Catalog (25 Servers)
 
+* **Smart Auto Eligible (6 Unfiltered Global Resolvers):** Cloudflare *(DoH + IPv6)*, Google DNS *(DoH + IPv6)*, OpenDNS *(DoH + IPv6)*, ControlD *(DoH + IPv6)*, Mullvad DNS *(Unfiltered `194.242.2.2` + `2a07:e340::2`, DoH)*, Level3
+* **Other Global (3):** Yandex DNS *(IPv6)*, AliDNS *(DoH + IPv6)*, 114DNS
 * **Iran & Gaming (8):** Shecan *(DoH)*, Electro, Radar Game, 403 Online, Begzar, Shelter, Shatel DNS, HostIran
-* **Global (9):** Cloudflare *(DoH)*, Google DNS *(DoH)*, OpenDNS *(DoH)*, ControlD *(DoH)*, Mullvad DNS *(DoH)*, Yandex DNS, Level3, AliDNS *(DoH)*, 114DNS
-* **Ad & Security (8):** AdGuard *(DoH)*, Quad9 *(DoH)*, Cloudflare Safe *(DoH)*, Cloudflare Family *(DoH)*, CleanBrowsing *(DoH)*, dns0.eu *(DoH)*, Comodo Secure, Alternate DNS
+* **Ad & Security (8):** AdGuard *(DoH + IPv6)*, Quad9 *(DoH + IPv6)*, Cloudflare Safe *(DoH + IPv6)*, Cloudflare Family *(DoH + IPv6)*, CleanBrowsing *(DoH + IPv6)*, dns0.eu *(DoH + IPv6)*, Comodo Secure, Alternate DNS
 
 ---
 
 ## Security Architecture
 
-Because network configuration requires `Administrator` privileges, AionToolLite is built with defense-in-depth protections:
+Because changing Windows network configuration requires `Administrator` privileges, AionToolLite enforces strict, fail-closed security boundaries:
 
-* **Admin-Locked Silent Auto-Updater:** Downloads installers exclusively over `TLS 1.2 / 1.3` from verified `github.com` / `.githubusercontent.com` HTTPS hosts (including post-redirect checks) into an NTFS-locked `%ProgramData%\AionToolLite\Updates` folder accessible only to `SYSTEM` and `Administrators`, validates the Windows `MZ` PE header, and verifies `SHA256` against `checksums.txt` before execution.
-* **Strict System32 Process Execution:** All Windows utilities (`netsh`, `ipconfig`, `schtasks`, `sc`, `icacls`, `nbtstat`, `notepad`) are resolved strictly from `System32` and invoked via `ProcessStartInfo.ArgumentList`.
-* **Symlink & Atomic File Safety:** Hosts writes are serialized with `SemaphoreSlim`, written atomically without UTF-8 BOM via `File.Replace`, and reject `ReparsePoint` / symbolic links across hosts, backups, and temp cleanup.
-* **Strict Allowlists & Automatic DNS Backup:** Game Mode only touches an explicit 4-service allowlist, and your original DNS configuration is backed up automatically before the first change.
+* **Fail-Closed Cryptographic Auto-Updater:**
+  * Downloads strictly over `TLS 1.2 / 1.3` from verified `github.com` / `.githubusercontent.com` HTTPS hosts (including post-redirect verification).
+  * Requires a matching `SHA256` entry in `checksums.txt` (verified in constant time) **and** an independent cryptographic trust anchor—either a detached **RSA-3072 / SHA-256** signature (`checksums.txt.sig`) verified against the developer's offline public key pinned at build time, or a matching Windows **Authenticode** publisher signature (`WinVerifyTrust`). Unsigned/unpinned local builds refuse silent admin auto-installation and direct users to download manually.
+  * Stages updates inside a freshly created random directory under `%ProgramFiles%\AionToolLite\Updates` created atomically with admin-only NTFS ACLs (`SYSTEM` + `Administrators`), verifying ancestor and staging folder ownership before download and again before execution.
+* **Admin-Only Privileged State & Backups:** `hosts.backup.*`, `dns_original_backup.json`, and `gamemode_state.json` are stored in `%ProgramFiles%\AionToolLite\State` (owned by `Administrators`, writable only by `SYSTEM` and `Administrators`) and verified before every read/restore—preventing same-user tampering via `%APPDATA%`. Only non-privileged UI settings live in `%APPDATA%`.
+* **Elevated Auto-Start Restricted to `Program Files`:** Registering the elevated logon task is refused unless `AionToolLite.exe` and every ancestor directory up through `Program Files` are non-symlink, admin-owned, and non-user-writable. The scheduled task XML disables battery termination and the 72-hour execution timeout.
+* **System32-Only Process Execution & Non-Recursive Temp Cleanup:** System utilities are resolved strictly from `System32`, invoked via `ProcessStartInfo.ArgumentList` with native Win32 OEM output decoding, and the confirmed Temp cleaner deletes only individual files older than 24 hours and empty non-reparse folders.
 
 ---
 
@@ -68,8 +72,8 @@ Because network configuration requires `Administrator` privileges, AionToolLite 
 
 1. Go to the [**Latest Release**](https://github.com/Yoqaizo/AionToolLite/releases/latest) page.
 2. Download **`AionToolLite_Setup_v1.1.0.exe`**.
-3. Run the installer and launch **AionToolLite**.
-4. Future updates are flagged automatically by a subtle badge dot on **Settings** and can be installed silently in one click.
+3. Run the installer (installs to `C:\Program Files\AionToolLite`) and launch **AionToolLite**.
+4. Verify integrity optionally with `Get-FileHash .\AionToolLite_Setup_v1.1.0.exe -Algorithm SHA256` against `checksums.txt`.
 
 ---
 

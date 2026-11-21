@@ -4,12 +4,28 @@ All notable changes to **AionToolLite** are documented in this file.
 
 ## [1.1.0] - 2026-11-21
 ### Added
-- **Native Windows 11 DoH Encryption:** Added one-tap DoH toggle (`netsh dns add encryption` with `udpfallback=yes`) and `DoH` micro-badges across 13 supported built-in DNS servers.
-- **Stability & Packet Loss / Jitter Check:** Added 4-second Boost diagnostic comparing Modem Gateway vs Internet (`4.2.2.4`) latency, jitter, and packet loss with automatic root-cause verdict.
-- **5 Saved Custom DNS Slots:** Added named custom DNS persistence (up to 5 slots) with pin (`★`), delete (`✕`), UDP/53 benchmarking, Smart Auto inclusion, and Tray quick-switch support.
-- **Tray Connected Status Dot & Global Hotkey (`Ctrl + Alt + D`):** Added dynamic emerald badge on the System Tray icon when connected (with GDI `DestroyIcon` cleanup) and toggleable Win32 `RegisterHotKey` support.
-- **Auto-Connect on Startup:** Added optional setting to automatically connect the selected DNS / Smart Auto on app launch.
-- **Silent Startup Update Badge:** Added non-blocking background GitHub release check showing a subtle dot on Settings when a newer version is available.
+- **Native Windows 11 DoH Encryption:** One-tap DoH toggle (`netsh dns add encryption` with `udpfallback=yes`) and `DoH` micro-badges on supported resolvers.
+- **Stability & Packet Loss / Jitter Check:** 4-second diagnostic comparing Modem Gateway vs. Internet (`4.2.2.4`) with separate detection for routers that block ICMP.
+- **5 Saved Custom DNS Slots:** Named custom IPv4 DNS slots (up to 5) with `★` pinning, `✕` deletion, UDP/53 benchmarking, and Tray quick-switching.
+- **Tray Connected Status Dot & Global Hotkey (`Ctrl + Alt + D`):** Dynamic emerald status dot on the Tray icon (synced even when minimized) and toggleable Win32 `RegisterHotKey` shortcut.
+- **Network-Ready Auto-Connect on Startup & Silent Update Badge:** Retries adapter readiness on logon and shows a non-blocking update indicator on Settings.
+- **Clean Uninstall Restoration (`--uninstall-cleanup`):** Uninstaller automatically restores original DNS, original `hosts` (or removes managed blocks), and paused Game Mode services before removing files.
+
+### Security & Hardening
+- **Fail-Closed Signed Updater:** Enforced mandatory `SHA256` (`checksums.txt`) plus offline **RSA-3072** detached signature (`checksums.txt.sig`) and/or `WinVerifyTrust` Authenticode verification; unsigned builds refuse silent admin updates.
+- **Admin-Owned Atomic Staging & State Storage:** Moved update staging and privileged backups/state (`hosts.backup.*`, `dns_original_backup.json`, `gamemode_state.json`) to owner- and DACL-verified admin-only directories under `%ProgramFiles%\AionToolLite`.
+- **Restricted Elevated Auto-Start & Laptop-Safe Task XML:** Elevated logon tasks are only permitted from admin-owned `Program Files` installations and disable battery stop and the 72-hour timeout.
+
+### Fixed
+- Removed destructive global `netsh int ip reset` from Full Network Fix (now scoped to the chosen adapter).
+- Replaced recursive Temp folder deletion with safe non-recursive file-only deletion (>24h creation & write time) plus confirmation prompt.
+- Made hosts backups fail-closed before apply/reset, separated manual vs. original backups, serialized read-modify-write under `_hostsLock`, and tightened blocklist tag matching.
+- Fixed lossless original DNS backup/restore for `127.0.0.1` loopback and static IPv6 DNS, and restored original DNS on normal Disconnect.
+- Added IPv6 leak warning on IPv4-only presets and partial-failure reporting for secondary/IPv6 DNS steps.
+- Restricted **Smart Auto** to 6 neutral, unfiltered global resolvers and fixed Mullvad DNS secondary (`194.242.2.2` + `2a07:e340::2` unfiltered).
+- Added native Win32 OEM output decoding (`MultiByteToWideChar`) and Registry-based locale-independent disabled adapter detection.
+- Added boot-timestamp tracking for Game Mode so stale state clears automatically after a reboot.
+- Fixed Alt+F4 / taskbar Close minimizing to Tray while allowing Shutdown / Restart Manager to exit cleanly; clamped window height for 768p/DPI displays; added explicit `📋` copy button for Public IP; fixed DoH toggle revert on failure; added large-blocklist warning; made regional ping channel locale-aware.
 
 ## [1.0.0] - 2026-11-21
 ### Added

@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
+using AionToolLite.Services;
 
 namespace AionToolLite
 {
@@ -24,6 +25,7 @@ namespace AionToolLite
         private static bool _ownsMutex;
 
         public static bool StartMinimized { get; private set; }
+        public static bool IsShuttingDown { get; private set; }
 
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
@@ -36,6 +38,22 @@ namespace AionToolLite
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            if (e.Args.Any(a => a.Equals("--uninstall-cleanup", StringComparison.OrdinalIgnoreCase)))
+            {
+                try
+                {
+                    var svc = new LiteNetworkService();
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+                    svc.PerformUninstallCleanupAsync(cts.Token).GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    WriteCrashLog("UninstallCleanup", ex);
+                }
+                Shutdown(0);
+                return;
+            }
+
             StartMinimized = e.Args.Any(a =>
                 a.Equals("--minimized", StringComparison.OrdinalIgnoreCase) ||
                 a.Equals("-minimized", StringComparison.OrdinalIgnoreCase));
@@ -43,7 +61,11 @@ namespace AionToolLite
             DispatcherUnhandledException += OnDispatcherUnhandledException;
             TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
             AppDomain.CurrentDomain.UnhandledException += OnCurrentDomainUnhandledException;
-            SessionEnding += (_, _) => Shutdown();
+            SessionEnding += (_, _) =>
+            {
+                IsShuttingDown = true;
+                Shutdown();
+            };
 
             try
             {
@@ -72,7 +94,6 @@ namespace AionToolLite
 
         private static void SignalExistingInstance()
         {
-            // First try named event (wakes even if MainWindow is hidden in System Tray!)
             try
             {
                 using var evt = EventWaitHandle.OpenExisting(ShowEventName);
@@ -81,7 +102,6 @@ namespace AionToolLite
             }
             catch { }
 
-            // Fallback: activate visible window handle
             try
             {
                 using var current = Process.GetCurrentProcess();
@@ -185,7 +205,7 @@ namespace AionToolLite
                             IntPtr.Zero,
                             $"AionToolLite encountered a startup/runtime error:\n\n{ex.GetType().Name}: {ex.Message}{innerMsg}\n\nDetails saved to %APPDATA%\\AionToolLite\\crash.log",
                             "AionToolLite — Fatal Error",
-                            0x00000010); // MB_ICONERROR
+                            0x00000010);
                     }
                     catch { }
                 }
@@ -223,6 +243,7 @@ namespace AionToolLite
 
         protected override void OnExit(ExitEventArgs e)
         {
+            IsShuttingDown = true;
             try
             {
                 _ipcCts?.Cancel();

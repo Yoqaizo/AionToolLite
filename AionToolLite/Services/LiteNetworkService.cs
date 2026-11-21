@@ -11,8 +11,12 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security;
+using System.Security.AccessControl;
 using System.Security.Authentication;
+using System.Security.Principal;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -32,7 +36,13 @@ namespace AionToolLite.Services
         private const long MaxConfigFileBytes = 64 * 1024;
         private const long MaxBlocklistBytes = 12 * 1024 * 1024;
         private const long MaxUpdaterBytes = 150 * 1024 * 1024;
+        private const long MaxChecksumBytes = 64 * 1024;
+        private const long MaxSignatureBytes = 8 * 1024;
         private const int MaxBlocklistEntries = 200_000;
+
+        // Offline RSA-3072 public key pinned automatically by Release-Manager.ps1 (private key never leaves developer PC)
+        private const string PinnedReleaseRsaModulusBase64 = "yg2Zz+JUQi8F+Uzwih5Da8uXC057IGPqqOc1EGjIl1AzqAyI3Fl5CySI3Naz/WBdblSbZ4L7Wk6aD2p1NmZ3N8EcJs30Vajzm+Kumm5WJHN+TGklHF5iyEbIehajEQWHgJxRD0eJCjE1IDGtONAhd0YS7sHxSlJz88CPj1obNcrBmFuvUc8usScYNCA8be0aiNaBglw/LZ5I1/2l6VdBt/DkKxgmmNCK+53PKaZqZMg91/WmkFzwMx9aL9WtfeOc2st/DPWpLPcV6j6/vXLZcg7d2OUYDvVKNOWyv0ffnGcrA8aSvt7TLzOdBKI5udDbMiEKATZBecTYS1mLPFnzLjopWhCFaomrvlKHSyhNTbJrmj3SZDD9SO6qOfTY7N6P73v5dzy3/AZ8NoFK9Qe0Eejy7knSnIOXKUqqqikORc5WKsUNsyaUyhHKrOAC2Uiscx76+yhYPqkdeEzA/Q9AFat5ddWy2zYCV2NkBPEztFHOjRDBV1Gk/cN0NI0VTgXR";
+        private const string PinnedReleaseRsaExponentBase64 = "AQAB";
         private const int MaxBackupsToKeep = 10;
 
         private readonly ProcessRunner _runner = new();
@@ -46,8 +56,10 @@ namespace AionToolLite.Services
 
         private readonly string _cfgDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AionToolLite");
+        private readonly string _secureStateDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "AionToolLite", "State");
         private readonly string _secureUpdatesDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "AionToolLite", "Updates");
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "AionToolLite", "Updates");
         private readonly string _hostsPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.System), @"drivers\etc\hosts");
 
@@ -79,9 +91,10 @@ namespace AionToolLite.Services
         private static extern uint DnsFlushResolverCache();
 
         private string SettingsFilePath => Path.Combine(_cfgDir, "settings.json");
-        private string GameModeStatePath => Path.Combine(_cfgDir, "gamemode_state.json");
-        private string HostsOriginalBackupPath => Path.Combine(_cfgDir, "hosts.backup.original");
-        private string OriginalDnsBackupPath => Path.Combine(_cfgDir, "dns_original_backup.json");
+        private string GameModeStatePath => Path.Combine(_secureStateDir, "gamemode_state.json");
+        private string HostsOriginalBackupPath => Path.Combine(_secureStateDir, "hosts.backup.original");
+        private string HostsManualBackupPath => Path.Combine(_secureStateDir, "hosts.backup.manual");
+        private string OriginalDnsBackupPath => Path.Combine(_secureStateDir, "dns_original_backup.json");
 
         private static HttpClient CreateHttpClient()
         {
@@ -135,6 +148,78 @@ namespace AionToolLite.Services
             return File.ReadAllText(path, Encoding.UTF8);
         }
 
+        private string? EnsureAdminOnlyStateDirectory()
+        {
+            try
+            {
+                string programFilesDir = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+                string appDir = Path.GetDirectoryName(_secureStateDir)!;
+
+                if (!IsDirectoryOwnedAndLockedByAdmins(programFilesDir, strictAdminOnly: false))
+                    return null;
+
+                if (!Directory.Exists(appDir))
+                {
+                    FileSystemAclExtensions.CreateDirectory(BuildAdminOnlyDirectorySecurity(), appDir);
+                }
+                if (!IsDirectoryOwnedAndLockedByAdmins(appDir, strictAdminOnly: false))
+                    return null;
+
+                if (!Directory.Exists(_secureStateDir))
+                {
+                    FileSystemAclExtensions.CreateDirectory(BuildAdminOnlyDirectorySecurity(), _secureStateDir);
+                }
+                if (!IsDirectoryOwnedAndLockedByAdmins(_secureStateDir, strictAdminOnly: true))
+                    return null;
+
+                return _secureStateDir;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private string? ReadAdminVerifiedSmallJsonTextSafe(string path)
+        {
+            if (!IsDirectoryOwnedAndLockedByAdmins(_secureStateDir, strictAdminOnly: true))
+                return null;
+            if (!IsFileOwnedAndLockedByAdmins(path, strictAdminOnly: true))
+                return null;
+            return ReadSmallJsonTextSafe(path);
+        }
+
+        private bool AtomicWriteAdminOnlyText(string destPath, string content)
+        {
+            if (EnsureAdminOnlyStateDirectory() == null)
+                return false;
+            if (File.Exists(destPath) && !IsFileOwnedAndLockedByAdmins(destPath, strictAdminOnly: true))
+                return false;
+
+            string tmp = destPath + $".{Guid.NewGuid():N}.tmp";
+            try
+            {
+                File.WriteAllText(tmp, content, new UTF8Encoding(false));
+                if (!IsFileOwnedAndLockedByAdmins(tmp, strictAdminOnly: true))
+                    return false;
+
+                if (File.Exists(destPath))
+                    File.Replace(tmp, destPath, null, true);
+                else
+                    File.Move(tmp, destPath);
+
+                return IsFileOwnedAndLockedByAdmins(destPath, strictAdminOnly: true);
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            }
+        }
+
         private static string SanitizeHeaderToken(string input)
         {
             if (string.IsNullOrWhiteSpace(input)) return "Unknown";
@@ -149,32 +234,81 @@ namespace AionToolLite.Services
             try { await _runner.RunAsync("ipconfig", new[] { "/flushdns" }, token, TimeSpan.FromSeconds(6)).ConfigureAwait(false); } catch { }
         }
 
-        // ==================== AUTOMATIC ORIGINAL DNS BACKUP ====================
+        // ==================== AUTOMATIC ORIGINAL DNS BACKUP (LOSSLESS IPv4 + LOOPBACK + IPv6) ====================
+        private static (List<string> Ipv4, List<string> Ipv6) ReadInterfaceStaticDnsFromRegistry(string nicGuid)
+        {
+            var v4 = new List<string>();
+            var v6 = new List<string>();
+
+            try
+            {
+                using var key4 = Registry.LocalMachine.OpenSubKey(
+                    $@"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{nicGuid}", false);
+                if (key4?.GetValue("NameServer") is string raw4 && !string.IsNullOrWhiteSpace(raw4))
+                {
+                    v4.AddRange(raw4
+                        .Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                        .Select(s => s.Trim())
+                        .Where(LiteCatalog.IsValidBackupDnsIpv4)
+                        .Distinct(StringComparer.OrdinalIgnoreCase));
+                }
+            }
+            catch { }
+
+            try
+            {
+                using var key6 = Registry.LocalMachine.OpenSubKey(
+                    $@"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\{nicGuid}", false);
+                if (key6?.GetValue("NameServer") is string raw6 && !string.IsNullOrWhiteSpace(raw6))
+                {
+                    v6.AddRange(raw6
+                        .Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                        .Select(s => s.Trim())
+                        .Where(LiteCatalog.IsSafeDnsIpv6)
+                        .Distinct(StringComparer.OrdinalIgnoreCase));
+                }
+            }
+            catch { }
+
+            return (v4, v6);
+        }
+
         private void EnsureOriginalDnsBackupSaved(string interfaceName)
         {
             lock (_ioLock)
             {
                 try
                 {
-                    Directory.CreateDirectory(_cfgDir);
-                    string? existingJson = ReadSmallJsonTextSafe(OriginalDnsBackupPath);
+                    if (EnsureAdminOnlyStateDirectory() == null)
+                        return;
+
+                    string? existingJson = ReadAdminVerifiedSmallJsonTextSafe(OriginalDnsBackupPath);
                     var map = !string.IsNullOrEmpty(existingJson)
                         ? JsonSerializer.Deserialize<Dictionary<string, OriginalDnsBackup>>(existingJson)
                           ?? new Dictionary<string, OriginalDnsBackup>(StringComparer.OrdinalIgnoreCase)
                         : new Dictionary<string, OriginalDnsBackup>(StringComparer.OrdinalIgnoreCase);
 
-                    if (map.ContainsKey(interfaceName))
+                    if (map.Keys.Any(k => k.Equals(interfaceName, StringComparison.OrdinalIgnoreCase)))
                         return;
 
-                    var current = DetectActiveStaticDns(interfaceName);
-                    map[interfaceName] = new OriginalDnsBackup(
-                        interfaceName,
-                        WasDhcp: !current.IsStaticConnected,
-                        PrimaryIp: current.PrimaryIp,
-                        SecondaryIp: current.SecondaryIp,
-                        SavedAtUtc: DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"));
+                    var nic = NetworkInterface.GetAllNetworkInterfaces()
+                        .FirstOrDefault(n => n.Name.Equals(interfaceName, StringComparison.OrdinalIgnoreCase));
 
-                    File.WriteAllText(OriginalDnsBackupPath, JsonSerializer.Serialize(map, JsonOpts), new UTF8Encoding(false));
+                    var (v4, v6) = nic != null
+                        ? ReadInterfaceStaticDnsFromRegistry(nic.Id)
+                        : (new List<string>(), new List<string>());
+
+                    map[interfaceName] = new OriginalDnsBackup(
+                        AdapterName: interfaceName,
+                        WasDhcp: v4.Count == 0,
+                        PrimaryIp: v4.Count > 0 ? v4[0] : string.Empty,
+                        SecondaryIp: v4.Count > 1 ? v4[1] : string.Empty,
+                        SavedAtUtc: DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"),
+                        WasDhcpIpv6: v6.Count == 0,
+                        PrimaryIpv6: v6.Count > 0 ? v6[0] : string.Empty,
+                        SecondaryIpv6: v6.Count > 1 ? v6[1] : string.Empty);
+
+                    AtomicWriteAdminOnlyText(OriginalDnsBackupPath, JsonSerializer.Serialize(map, JsonOpts));
                 }
                 catch { }
             }
@@ -186,7 +320,7 @@ namespace AionToolLite.Services
             {
                 try
                 {
-                    string? json = ReadSmallJsonTextSafe(OriginalDnsBackupPath);
+                    string? json = ReadAdminVerifiedSmallJsonTextSafe(OriginalDnsBackupPath);
                     if (string.IsNullOrEmpty(json)) return null;
                     var map = JsonSerializer.Deserialize<Dictionary<string, OriginalDnsBackup>>(json);
                     if (map == null) return null;
@@ -203,23 +337,91 @@ namespace AionToolLite.Services
 
         public async Task<OperationResult> RestoreOriginalDnsAsync(string interfaceName, CancellationToken token = default)
         {
-            var backup = GetOriginalDnsBackup(interfaceName);
-            if (backup != null && !backup.WasDhcp && LiteCatalog.IsSafeDnsIpv4(backup.PrimaryIp))
-            {
-                var r = await ApplyDnsAsync(
-                    interfaceName,
-                    backup.PrimaryIp,
-                    string.IsNullOrWhiteSpace(backup.SecondaryIp) ? null : backup.SecondaryIp,
-                    "Original DNS",
-                    skipBackup: true,
-                    token: token).ConfigureAwait(false);
+            if (!TryValidateInterfaceName(interfaceName, out string iface))
+                return new OperationResult(false, "Invalid or missing network adapter.", "کارت شبکه انتخاب‌شده نامعتبر است.");
 
-                return r.Success
-                    ? new OperationResult(true, $"Restored your original DNS ({backup.PrimaryIp}).", $"دی‌ان‌اس قبلی شما ({backup.PrimaryIp}) بازیابی شد.")
-                    : r;
+            var backup = GetOriginalDnsBackup(iface);
+            if (backup == null || (backup.WasDhcp && backup.WasDhcpIpv6))
+            {
+                return await DisconnectDnsToAutoAsync(iface, token).ConfigureAwait(false);
             }
 
-            return await DisconnectDnsToAutoAsync(interfaceName, token).ConfigureAwait(false);
+            bool restoredV4Static = !backup.WasDhcp && LiteCatalog.IsValidBackupDnsIpv4(backup.PrimaryIp);
+            bool restoredV6Static = !backup.WasDhcpIpv6 && LiteCatalog.IsSafeDnsIpv6(backup.PrimaryIpv6);
+
+            if (!restoredV4Static && !restoredV6Static)
+                return await DisconnectDnsToAutoAsync(iface, token).ConfigureAwait(false);
+
+            var warnings = new List<string>();
+
+            if (restoredV4Static)
+            {
+                var r1 = await _runner.RunAsync("netsh", new[]
+                {
+                    "interface", "ip", "set", "dnsservers",
+                    $"name={iface}", "source=static", $"address={backup.PrimaryIp.Trim()}", "validate=no"
+                }, token, TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+                if (!r1.IsSuccess)
+                    return new OperationResult(false, $"Could not restore original IPv4 DNS ({backup.PrimaryIp}).", $"بازیابی دی‌ان‌اس قبلی ({backup.PrimaryIp}) ناموفق بود.");
+
+                if (LiteCatalog.IsValidBackupDnsIpv4(backup.SecondaryIp) &&
+                    !backup.SecondaryIp.Trim().Equals(backup.PrimaryIp.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    var r2 = await _runner.RunAsync("netsh", new[]
+                    {
+                        "interface", "ip", "add", "dnsservers",
+                        $"name={iface}", $"address={backup.SecondaryIp.Trim()}", "index=2", "validate=no"
+                    }, token, TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+                    if (!r2.IsSuccess) warnings.Add("secondary IPv4");
+                }
+            }
+            else
+            {
+                var rDhcp4 = await _runner.RunAsync("netsh", new[]
+                {
+                    "interface", "ip", "set", "dnsservers", $"name={iface}", "source=dhcp"
+                }, token, TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+                if (!rDhcp4.IsSuccess) warnings.Add("IPv4 DHCP");
+            }
+
+            if (restoredV6Static)
+            {
+                var r6p = await _runner.RunAsync("netsh", new[]
+                {
+                    "interface", "ipv6", "set", "dnsservers",
+                    $"name={iface}", "source=static", $"address={backup.PrimaryIpv6.Trim()}", "validate=no"
+                }, token, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                if (!r6p.IsSuccess) warnings.Add("IPv6 DNS");
+
+                if (LiteCatalog.IsSafeDnsIpv6(backup.SecondaryIpv6) &&
+                    !backup.SecondaryIpv6.Trim().Equals(backup.PrimaryIpv6.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    var r6s = await _runner.RunAsync("netsh", new[]
+                    {
+                        "interface", "ipv6", "add", "dnsservers",
+                        $"name={iface}", $"address={backup.SecondaryIpv6.Trim()}", "index=2", "validate=no"
+                    }, token, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                    if (!r6s.IsSuccess) warnings.Add("secondary IPv6");
+                }
+            }
+            else
+            {
+                await _runner.RunAsync("netsh", new[]
+                {
+                    "interface", "ipv6", "set", "dnsservers", $"name={iface}", "source=dhcp"
+                }, token, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+            }
+
+            await FastFlushDnsCacheAsync(token).ConfigureAwait(false);
+
+            string summaryTarget = restoredV4Static ? backup.PrimaryIp : backup.PrimaryIpv6;
+            string warnSuffixEn = warnings.Count > 0 ? $" (partial: {string.Join(", ", warnings)})" : string.Empty;
+            string warnSuffixFa = warnings.Count > 0 ? " (با هشدار جزئی)" : string.Empty;
+
+            return new OperationResult(
+                true,
+                $"Restored original DNS ({summaryTarget}){warnSuffixEn}.",
+                $"دی‌ان‌اس قبلی شما ({summaryTarget}) بازیابی شد{warnSuffixFa}.");
         }
 
         // ==================== AUTOMATIC ACTIVE STATIC DNS DETECTION ====================
@@ -241,51 +443,42 @@ namespace AionToolLite.Services
                 if (nic == null)
                     return ActiveDnsStatus.Automatic;
 
-                string? rawStatic = null;
-                try
+                var (ips4, ips6) = ReadInterfaceStaticDnsFromRegistry(nic.Id);
+                if (ips4.Count == 0 && ips6.Count == 0)
+                    return ActiveDnsStatus.Automatic;
+
+                string primary = ips4.Count > 0 ? ips4[0] : string.Empty;
+                string secondary = ips4.Count > 1 ? ips4[1] : string.Empty;
+                string primary6 = ips6.Count > 0 ? ips6[0] : string.Empty;
+                string secondary6 = ips6.Count > 1 ? ips6[1] : string.Empty;
+
+                if (!string.IsNullOrEmpty(primary))
                 {
-                    using var key = Registry.LocalMachine.OpenSubKey(
-                        $@"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{nic.Id}", false);
-                    if (key != null)
+                    var matched = LiteCatalog.DnsPresets.FirstOrDefault(p =>
+                        !p.IsSmartAuto && p.PrimaryIp.Equals(primary, StringComparison.OrdinalIgnoreCase));
+                    if (matched != null)
+                        return new ActiveDnsStatus(true, primary, secondary, matched.Name, matched.Name, matched.Id, primary6, secondary6);
+
+                    if (customEntries != null)
                     {
-                        rawStatic = key.GetValue("NameServer") as string;
+                        var customMatched = customEntries.FirstOrDefault(c =>
+                            c.PrimaryIp.Equals(primary, StringComparison.OrdinalIgnoreCase));
+                        if (customMatched != null)
+                            return new ActiveDnsStatus(true, primary, secondary, customMatched.Name, customMatched.Name, customMatched.Id, primary6, secondary6);
                     }
-                }
-                catch { }
 
-                if (string.IsNullOrWhiteSpace(rawStatic))
-                    return ActiveDnsStatus.Automatic;
+                    if (primary.StartsWith("127.", StringComparison.Ordinal))
+                        return new ActiveDnsStatus(true, primary, secondary, "Local Resolver", "سرور محلی (Loopback)", null, primary6, secondary6);
 
-                var ips = rawStatic
-                    .Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries)
-                    .Select(s => s.Trim())
-                    .Where(LiteCatalog.IsSafeDnsIpv4)
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                if (ips.Count == 0)
-                    return ActiveDnsStatus.Automatic;
-
-                string primary = ips[0];
-                string secondary = ips.Count > 1 ? ips[1] : string.Empty;
-
-                var matched = LiteCatalog.DnsPresets.FirstOrDefault(p =>
-                    !p.IsSmartAuto && p.PrimaryIp.Equals(primary, StringComparison.OrdinalIgnoreCase));
-
-                if (matched != null)
-                {
-                    return new ActiveDnsStatus(true, primary, secondary, matched.Name, matched.Name, matched.Id);
+                    return new ActiveDnsStatus(true, primary, secondary, "Custom DNS", "دی‌ان‌اس دستی", null, primary6, secondary6);
                 }
 
-                if (customEntries != null)
-                {
-                    var customMatched = customEntries.FirstOrDefault(c =>
-                        c.PrimaryIp.Equals(primary, StringComparison.OrdinalIgnoreCase));
-                    if (customMatched != null)
-                        return new ActiveDnsStatus(true, primary, secondary, customMatched.Name, customMatched.Name, customMatched.Id);
-                }
+                var matchedV6 = LiteCatalog.DnsPresets.FirstOrDefault(p =>
+                    !string.IsNullOrEmpty(p.PrimaryIpv6) && p.PrimaryIpv6.Equals(primary6, StringComparison.OrdinalIgnoreCase));
+                if (matchedV6 != null)
+                    return new ActiveDnsStatus(true, primary6, secondary6, matchedV6.Name, matchedV6.Name, matchedV6.Id, primary6, secondary6);
 
-                return new ActiveDnsStatus(true, primary, secondary, "Custom DNS", "دی‌ان‌اس دستی", null);
+                return new ActiveDnsStatus(true, primary6, secondary6, "Custom IPv6 DNS", "دی‌ان‌اس دستی IPv6", null, primary6, secondary6);
             }
             catch
             {
@@ -325,24 +518,90 @@ namespace AionToolLite.Services
                         return new OperationResult(false, "Blocked auto-start: unsafe executable path.", "شروع خودکار مسدود شد: مسیر فایل اجرایی ایمن نیست.");
                     }
 
-                    string tempRoot = Path.GetFullPath(Path.GetTempPath());
-                    if (exePath.StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase))
+                    if (!IsExecutableSafeForElevatedAutoStart(exePath))
                     {
                         return new OperationResult(
                             false,
-                            "Move AionToolLite out of Temp (or install via Setup) before enabling Start with Windows.",
-                            "قبل از فعال‌سازی شروع خودکار، برنامه را نصب کنید یا از پوشه Temp خارج کنید.");
+                            "For security, Start with Windows is only allowed when AionToolLite is installed in an admin-protected Program Files folder (run the official Setup installer).",
+                            "برای حفظ امنیت سیستم، شروع خودکار با دسترسی ادمین فقط زمانی مجاز است که برنامه از طریق فایل نصبی در پوشه محافظت‌شده Program Files نصب شده باشد.");
                     }
 
-                    var res = await _runner.RunAsync("schtasks", new[]
+                    string? stateDir = EnsureAdminOnlyStateDirectory();
+                    if (string.IsNullOrEmpty(stateDir))
                     {
-                        "/Create",
-                        "/TN", AutoStartTaskName,
-                        "/TR", $"\"{exePath}\" --minimized",
-                        "/SC", "ONLOGON",
-                        "/RL", "HIGHEST",
-                        "/F"
-                    }, token, TimeSpan.FromSeconds(12)).ConfigureAwait(false);
+                        return new OperationResult(
+                            false,
+                            "Could not prepare verified admin-only state folder for task registration.",
+                            "آماده‌سازی پوشه امن ادمین برای ثبت تسک ناموفق بود.");
+                    }
+
+                    using var currentIdentity = WindowsIdentity.GetCurrent();
+                    string? userSid = currentIdentity.User?.Value;
+                    string escapedExe = SecurityElement.Escape(exePath) ?? exePath;
+                    string userIdTag = !string.IsNullOrWhiteSpace(userSid)
+                        ? $"      <UserId>{SecurityElement.Escape(userSid)}</UserId>\r\n"
+                        : string.Empty;
+
+                    string taskXml =
+                        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n" +
+                        "<Task version=\"1.3\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n" +
+                        "  <RegistrationInfo>\r\n" +
+                        "    <Description>Starts AionToolLite quietly in the System Tray on user logon.</Description>\r\n" +
+                        "  </RegistrationInfo>\r\n" +
+                        "  <Triggers>\r\n" +
+                        "    <LogonTrigger>\r\n" +
+                        "      <Enabled>true</Enabled>\r\n" +
+                        userIdTag +
+                        "    </LogonTrigger>\r\n" +
+                        "  </Triggers>\r\n" +
+                        "  <Principals>\r\n" +
+                        "    <Principal id=\"Author\">\r\n" +
+                        userIdTag +
+                        "      <LogonType>InteractiveToken</LogonType>\r\n" +
+                        "      <RunLevel>HighestAvailable</RunLevel>\r\n" +
+                        "    </Principal>\r\n" +
+                        "  </Principals>\r\n" +
+                        "  <Settings>\r\n" +
+                        "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\r\n" +
+                        "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\r\n" +
+                        "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\r\n" +
+                        "    <AllowHardTerminate>true</AllowHardTerminate>\r\n" +
+                        "    <StartWhenAvailable>true</StartWhenAvailable>\r\n" +
+                        "    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>\r\n" +
+                        "    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>\r\n" +
+                        "    <AllowStartOnDemand>true</AllowStartOnDemand>\r\n" +
+                        "    <Enabled>true</Enabled>\r\n" +
+                        "    <Hidden>false</Hidden>\r\n" +
+                        "    <RunOnlyIfIdle>false</RunOnlyIfIdle>\r\n" +
+                        "    <WakeToRun>false</WakeToRun>\r\n" +
+                        "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\r\n" +
+                        "    <Priority>7</Priority>\r\n" +
+                        "  </Settings>\r\n" +
+                        "  <Actions Context=\"Author\">\r\n" +
+                        "    <Exec>\r\n" +
+                        $"      <Command>{escapedExe}</Command>\r\n" +
+                        "      <Arguments>--minimized</Arguments>\r\n" +
+                        "    </Exec>\r\n" +
+                        "  </Actions>\r\n" +
+                        "</Task>\r\n";
+
+                    string xmlPath = Path.Combine(stateDir, $"autostart_{Guid.NewGuid():N}.xml");
+                    ProcessResult res;
+                    try
+                    {
+                        await File.WriteAllTextAsync(xmlPath, taskXml, Encoding.Unicode, token).ConfigureAwait(false);
+                        res = await _runner.RunAsync("schtasks", new[]
+                        {
+                            "/Create",
+                            "/TN", AutoStartTaskName,
+                            "/XML", xmlPath,
+                            "/F"
+                        }, token, TimeSpan.FromSeconds(12)).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        try { if (File.Exists(xmlPath)) File.Delete(xmlPath); } catch { }
+                    }
 
                     return res.IsSuccess
                         ? new OperationResult(true, "Start with Windows enabled (starts quietly in Tray).", "شروع خودکار با ویندوز فعال شد (بی‌صدا در نوار ساعت).")
@@ -552,38 +811,34 @@ namespace AionToolLite.Services
                 }
                 catch { }
 
-                // Include Disabled physical hardware adapters only (cross-verified via Registry NCF_PHYSICAL)
+                // Include Disabled physical hardware adapters cleanly via Windows Registry (100% locale-independent)
                 try
                 {
-                    var res = await _runner.RunAsync("netsh", new[] { "interface", "show", "interface" }, token, TimeSpan.FromSeconds(4)).ConfigureAwait(false);
-                    if (res.IsSuccess && !string.IsNullOrWhiteSpace(res.StandardOutput))
+                    var activeGuids = new HashSet<string>(
+                        NetworkInterface.GetAllNetworkInterfaces().Select(n => n.Id),
+                        StringComparer.OrdinalIgnoreCase);
+
+                    foreach (var kv in nameToGuid)
                     {
-                        foreach (var raw in res.StandardOutput.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries).Skip(2))
+                        string name = kv.Key;
+                        string guid = kv.Value;
+
+                        if (activeGuids.Contains(guid)) continue;
+                        if (physicalMap.ContainsKey(name) || IsIgnoredAdapterText(name, null)) continue;
+
+                        if (regByGuid.TryGetValue(guid, out var meta) &&
+                            meta.IsPhysical &&
+                            !meta.IsVirtualOrHidden &&
+                            !meta.IsSoftwareComponent &&
+                            !IsIgnoredAdapterText(name, meta.DriverDesc))
                         {
-                            var line = raw.Trim();
-                            var m = Regex.Match(line, @"^(Enabled|Disabled)\s+(Connected|Disconnected)\s+\S+\s+(.+)$", RegexOptions.IgnoreCase);
-                            if (!m.Success) continue;
-
-                            string admin = m.Groups[1].Value;
-                            string name = m.Groups[3].Value.Trim();
-                            if (!admin.Equals("Disabled", StringComparison.OrdinalIgnoreCase)) continue;
-                            if (physicalMap.ContainsKey(name) || IsIgnoredAdapterText(name, null)) continue;
-
-                            if (nameToGuid.TryGetValue(name, out string? guid) &&
-                                regByGuid.TryGetValue(guid, out var meta) &&
-                                meta.IsPhysical &&
-                                !meta.IsVirtualOrHidden &&
-                                !meta.IsSoftwareComponent &&
-                                !IsIgnoredAdapterText(name, meta.DriverDesc))
+                            physicalMap[name] = new LiteAdapterItem
                             {
-                                physicalMap[name] = new LiteAdapterItem
-                                {
-                                    Name = name,
-                                    HardwareDesc = meta.DriverDesc,
-                                    HasGateway = false,
-                                    Health = AdapterHealth.Disabled
-                                };
-                            }
+                                Name = name,
+                                HardwareDesc = meta.DriverDesc,
+                                HasGateway = false,
+                                Health = AdapterHealth.Disabled
+                            };
                         }
                     }
                 }
@@ -648,12 +903,6 @@ namespace AionToolLite.Services
             if (_resolveCache.TryGetValue(hostOrIp, out var stale))
                 return stale.Ip;
 
-            if (hostOrIp.Contains("arvancloud.ir", StringComparison.OrdinalIgnoreCase))
-            {
-                var fallback = IPAddress.Parse("185.143.232.253");
-                _resolveCache[hostOrIp] = (fallback, DateTime.UtcNow.AddMinutes(1));
-                return fallback;
-            }
             return null;
         }
 
@@ -689,7 +938,10 @@ namespace AionToolLite.Services
             return null;
         }
 
-        public async Task<LiteTelemetry> CaptureTelemetryAsync(string interfaceName, IReadOnlyList<SavedCustomDnsEntry>? customEntries = null)
+        public async Task<LiteTelemetry> CaptureTelemetryAsync(
+            string interfaceName,
+            IReadOnlyList<SavedCustomDnsEntry>? customEntries = null,
+            bool useIranRegionalTarget = false)
         {
             string routerIp = await Task.Run(() => DetectGatewayIp(interfaceName)).ConfigureAwait(false);
 
@@ -697,7 +949,9 @@ namespace AionToolLite.Services
                 ? PingHostFastAsync(routerIp, 800, 80)
                 : Task.FromResult<long?>(null);
             await Task.Delay(25).ConfigureAwait(false);
-            var tIntranet = PingHostFastAsync("www.arvancloud.ir", 1100, 443);
+            string regionalTarget = useIranRegionalTarget ? "www.arvancloud.ir" : "1.1.1.1";
+            int regionalPort = useIranRegionalTarget ? 443 : 53;
+            var tIntranet = PingHostFastAsync(regionalTarget, 1100, regionalPort);
             await Task.Delay(25).ConfigureAwait(false);
             var tGlobal = PingHostFastAsync("4.2.2.4", 1100, 53);
 
@@ -840,21 +1094,32 @@ namespace AionToolLite.Services
             IEnumerable<LiteDnsPreset>? extraPresets = null,
             CancellationToken token = default)
         {
-            var customList = extraPresets?.Where(p => !p.IsSmartAuto && LiteCatalog.IsSafeDnsIpv4(p.PrimaryIp)).ToList();
-            var map = await BenchmarkAllPresetsAsync(rounds: 1, timeoutMs: 950, extraPresets: customList, token: token).ConfigureAwait(false);
+            // Smart Auto only selects from neutral, unfiltered global resolvers
+            var eligible = LiteCatalog.DnsPresets.Where(x => x.SmartAutoEligible).ToList();
+            using var sem = new SemaphoreSlim(8);
+            var tasks = eligible.Select(async preset =>
+            {
+                await sem.WaitAsync(token).ConfigureAwait(false);
+                try
+                {
+                    long? ms = await QueryDnsUdpMsAsync(preset.PrimaryIp, 950, token).ConfigureAwait(false);
+                    return (Preset: preset, Latency: ms);
+                }
+                finally
+                {
+                    sem.Release();
+                }
+            });
+
             LiteDnsPreset? best = null;
             long bestMs = long.MaxValue;
 
-            var candidates = customList != null
-                ? LiteCatalog.DnsPresets.Where(x => !x.IsSmartAuto).Concat(customList)
-                : LiteCatalog.DnsPresets.Where(x => !x.IsSmartAuto);
-
-            foreach (var p in candidates)
+            foreach (var (preset, ms) in await Task.WhenAll(tasks).ConfigureAwait(false))
             {
-                if (map.TryGetValue(p.Id, out var ms) && ms.HasValue && ms.Value < bestMs)
+                if (ms.HasValue && ms.Value < bestMs)
                 {
                     bestMs = ms.Value;
-                    best = p;
+                    best = preset;
                 }
             }
 
@@ -1007,39 +1272,76 @@ namespace AionToolLite.Services
                     $"اعمال {label} انجام نشد. مطمئن شوید کارت شبکه فعال است.");
             }
 
+            var warningsEn = new List<string>();
+            var warningsFa = new List<string>();
+
             if (cleanSecondary != null)
             {
-                await _runner.RunAsync("netsh", new[]
+                var r2 = await _runner.RunAsync("netsh", new[]
                 {
                     "interface", "ip", "add", "dnsservers",
                     $"name={iface}", $"address={cleanSecondary}", "index=2", "validate=no"
                 }, token, TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+                if (!r2.IsSuccess)
+                {
+                    warningsEn.Add("secondary IPv4 failed");
+                    warningsFa.Add("ثبت DNS دوم ناموفق بود");
+                }
             }
 
-            if (!string.IsNullOrWhiteSpace(primaryIpv6) && IPAddress.TryParse(primaryIpv6, out var v6p) && v6p.AddressFamily == AddressFamily.InterNetworkV6)
+            if (LiteCatalog.IsSafeDnsIpv6(primaryIpv6) && IPAddress.TryParse(primaryIpv6!.Trim(), out var v6p))
             {
-                await _runner.RunAsync("netsh", new[]
+                var r6p = await _runner.RunAsync("netsh", new[]
                 {
                     "interface", "ipv6", "set", "dnsservers",
                     $"name={iface}", "source=static", $"address={v6p}", "validate=no"
                 }, token, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
 
-                if (!string.IsNullOrWhiteSpace(secondaryIpv6) && IPAddress.TryParse(secondaryIpv6, out var v6s) && v6s.AddressFamily == AddressFamily.InterNetworkV6)
+                if (!r6p.IsSuccess)
                 {
-                    await _runner.RunAsync("netsh", new[]
+                    warningsEn.Add("IPv6 DNS failed");
+                    warningsFa.Add("ثبت IPv6 ناموفق بود");
+                }
+                else if (LiteCatalog.IsSafeDnsIpv6(secondaryIpv6) && IPAddress.TryParse(secondaryIpv6!.Trim(), out var v6s))
+                {
+                    var r6s = await _runner.RunAsync("netsh", new[]
                     {
                         "interface", "ipv6", "add", "dnsservers",
                         $"name={iface}", $"address={v6s}", "index=2", "validate=no"
                     }, token, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                    if (!r6s.IsSuccess)
+                    {
+                        warningsEn.Add("secondary IPv6 failed");
+                        warningsFa.Add("ثبت IPv6 دوم ناموفق بود");
+                    }
                 }
             }
             else
             {
                 await _runner.RunAsync("netsh", new[]
                 {
-                    "interface", "ipv6", "set", "dnsservers",
-                    $"name={iface}", "source=dhcp"
+                    "interface", "ipv6", "delete", "dnsservers",
+                    $"name={iface}", "all"
                 }, token, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+
+                bool hasActiveRouterIpv6Dns = false;
+                try
+                {
+                    var nic = NetworkInterface.GetAllNetworkInterfaces()
+                        .FirstOrDefault(n => n.Name.Equals(iface, StringComparison.OrdinalIgnoreCase));
+                    if (nic != null)
+                    {
+                        hasActiveRouterIpv6Dns = nic.GetIPProperties().DnsAddresses
+                            .Any(a => a.AddressFamily == AddressFamily.InterNetworkV6 && LiteCatalog.IsSafeDnsIpv6(a.ToString()));
+                    }
+                }
+                catch { }
+
+                if (hasActiveRouterIpv6Dns)
+                {
+                    warningsEn.Add("router IPv6 DNS active");
+                    warningsFa.Add("هشدار: IPv6 DNS مودم فعال است");
+                }
             }
 
             bool dohApplied = false;
@@ -1053,10 +1355,12 @@ namespace AionToolLite.Services
             await FastFlushDnsCacheAsync(token).ConfigureAwait(false);
 
             string dohSuffix = dohApplied ? " · DoH" : string.Empty;
+            string warnEn = warningsEn.Count > 0 ? $" (Warning: {string.Join("; ", warningsEn)})" : string.Empty;
+            string warnFa = warningsFa.Count > 0 ? $" ({string.Join("، ", warningsFa)})" : string.Empty;
             return new OperationResult(
                 true,
-                $"Connected to {label} ({cleanPrimary}){dohSuffix}",
-                $"متصل به {label} ({cleanPrimary}){dohSuffix}");
+                $"Connected to {label} ({cleanPrimary}){dohSuffix}{warnEn}",
+                $"متصل به {label} ({cleanPrimary}){dohSuffix}{warnFa}");
         }
 
         public async Task<OperationResult> DisconnectDnsToAutoAsync(string interfaceName, CancellationToken token = default)
@@ -1102,15 +1406,22 @@ namespace AionToolLite.Services
             try
             {
                 await FastFlushDnsCacheAsync(token).ConfigureAwait(false);
-                await _runner.RunAsync("netsh", new[] { "int", "ip", "reset" }, token).ConfigureAwait(false);
+                await _runner.RunAsync("netsh", new[] { "interface", "ip", "delete", "arpcache" }, token).ConfigureAwait(false);
 
-                await _runner.RunAsync("netsh", new[] { "interface", "set", "interface", $"name={iface}", "admin=disabled" }, token).ConfigureAwait(false);
-                disabledAdapter = true;
-                await Task.Delay(2000, token).ConfigureAwait(false);
+                // Scoped adapter restart only (do NOT run global `netsh int ip reset`, which wipes static IPs across all NICs)
+                var disRes = await _runner.RunAsync("netsh", new[] { "interface", "set", "interface", $"name={iface}", "admin=disabled" }, token).ConfigureAwait(false);
+                if (disRes.IsSuccess)
+                {
+                    disabledAdapter = true;
+                    await Task.Delay(2000, token).ConfigureAwait(false);
 
-                await _runner.RunAsync("netsh", new[] { "interface", "set", "interface", $"name={iface}", "admin=enabled" }, CancellationToken.None).ConfigureAwait(false);
-                disabledAdapter = false;
-                await Task.Delay(2000, token).ConfigureAwait(false);
+                    var enRes = await _runner.RunAsync("netsh", new[] { "interface", "set", "interface", $"name={iface}", "admin=enabled" }, CancellationToken.None).ConfigureAwait(false);
+                    if (!enRes.IsSuccess)
+                        return new OperationResult(false, $"Adapter '{iface}' was disabled and could not be re-enabled automatically.", $"کارت شبکه «{iface}» غیرفعال شد اما فعال‌سازی خودکار آن ناموفق بود.");
+
+                    disabledAdapter = false;
+                    await Task.Delay(2000, token).ConfigureAwait(false);
+                }
 
                 await _runner.RunAsync("ipconfig", new[] { "/release", iface }, token).ConfigureAwait(false);
                 await _runner.RunAsync("ipconfig", new[] { "/renew", iface }, token).ConfigureAwait(false);
@@ -1120,12 +1431,12 @@ namespace AionToolLite.Services
 
                 return new OperationResult(
                     true,
-                    $"Full reset completed for '{iface}'!",
-                    $"کارت شبکه «{iface}» به صورت کامل ریست و تعمیر شد!");
+                    $"Adapter '{iface}' restarted & DHCP/caches refreshed!",
+                    $"کارت شبکه «{iface}» ریستارت و کش شبکه/DHCP تازه‌سازی شد!");
             }
             catch (Exception ex)
             {
-                return new OperationResult(false, $"Full reset error: {ex.Message}", $"خطا در ریست کارت شبکه: {ex.Message}");
+                return new OperationResult(false, $"Adapter reset error: {ex.Message}", $"خطا در ریست کارت شبکه: {ex.Message}");
             }
             finally
             {
@@ -1136,19 +1447,59 @@ namespace AionToolLite.Services
             }
         }
 
-        // ==================== SAFE GAME MODE TOGGLE (STRICT SERVICE ALLOWLIST) ====================
+        // ==================== SAFE GAME MODE TOGGLE (STRICT SERVICE ALLOWLIST + REBOOT DETECTION) ====================
+        private static long GetCurrentSystemBootUtcTicks() =>
+            DateTime.UtcNow.Ticks - (Environment.TickCount64 * TimeSpan.TicksPerMillisecond);
+
+        private (bool IsActive, List<string> StoppedServices) ReadVerifiedGameModeState()
+        {
+            string? json = ReadAdminVerifiedSmallJsonTextSafe(GameModeStatePath);
+            if (string.IsNullOrEmpty(json))
+                return (false, new List<string>());
+
+            try
+            {
+                var trimmed = json.TrimStart();
+                if (trimmed.StartsWith("{", StringComparison.Ordinal))
+                {
+                    var rec = JsonSerializer.Deserialize<GameModeStateRecord>(json);
+                    if (rec == null || rec.StoppedServices == null || rec.StoppedServices.Count == 0)
+                        return (false, new List<string>());
+
+                    long currentBoot = GetCurrentSystemBootUtcTicks();
+                    if (Math.Abs(currentBoot - rec.BootUtcTicks) > TimeSpan.FromSeconds(60).Ticks)
+                    {
+                        try
+                        {
+                            if (IsDirectoryOwnedAndLockedByAdmins(_secureStateDir, strictAdminOnly: true) &&
+                                File.Exists(GameModeStatePath) && !IsReparsePoint(GameModeStatePath))
+                            {
+                                File.Delete(GameModeStatePath);
+                            }
+                        }
+                        catch { }
+                        return (false, new List<string>());
+                    }
+
+                    return (true, rec.StoppedServices);
+                }
+
+                var legacy = JsonSerializer.Deserialize<List<string>>(json);
+                return legacy != null && legacy.Count > 0
+                    ? (true, legacy)
+                    : (false, new List<string>());
+            }
+            catch
+            {
+                return (false, new List<string>());
+            }
+        }
+
         public bool IsGameModeActive()
         {
             lock (_ioLock)
             {
-                try
-                {
-                    string? json = ReadSmallJsonTextSafe(GameModeStatePath);
-                    if (string.IsNullOrEmpty(json)) return false;
-                    var list = JsonSerializer.Deserialize<List<string>>(json);
-                    return list != null && list.Count > 0;
-                }
-                catch { return false; }
+                return ReadVerifiedGameModeState().IsActive;
             }
         }
 
@@ -1184,9 +1535,9 @@ namespace AionToolLite.Services
 
                 lock (_ioLock)
                 {
-                    Directory.CreateDirectory(_cfgDir);
                     var saveList = stopped.Count > 0 ? stopped : new List<string> { "_ACTIVE_MARKER_" };
-                    File.WriteAllText(GameModeStatePath, JsonSerializer.Serialize(saveList, JsonOpts), new UTF8Encoding(false));
+                    var stateRec = new GameModeStateRecord(saveList, GetCurrentSystemBootUtcTicks());
+                    AtomicWriteAdminOnlyText(GameModeStatePath, JsonSerializer.Serialize(stateRec, JsonOpts));
                 }
 
                 return new OperationResult(
@@ -1199,13 +1550,9 @@ namespace AionToolLite.Services
                 List<string> toRestore;
                 lock (_ioLock)
                 {
-                    string? json = ReadSmallJsonTextSafe(GameModeStatePath);
-                    toRestore = !string.IsNullOrEmpty(json)
-                        ? JsonSerializer.Deserialize<List<string>>(json) ?? new List<string>()
-                        : new List<string>();
+                    toRestore = ReadVerifiedGameModeState().StoppedServices;
                 }
 
-                // Security: strictly filter against AllowedGameModeServices so tampered JSON in %APPDATA% cannot start arbitrary services
                 int restored = 0;
                 foreach (var s in toRestore.Where(x => AllowedGameModeServices.Contains(x)))
                 {
@@ -1215,7 +1562,15 @@ namespace AionToolLite.Services
 
                 lock (_ioLock)
                 {
-                    try { if (File.Exists(GameModeStatePath)) File.Delete(GameModeStatePath); } catch { }
+                    try
+                    {
+                        if (IsDirectoryOwnedAndLockedByAdmins(_secureStateDir, strictAdminOnly: true) &&
+                            File.Exists(GameModeStatePath) && !IsReparsePoint(GameModeStatePath))
+                        {
+                            File.Delete(GameModeStatePath);
+                        }
+                    }
+                    catch { }
                 }
 
                 return new OperationResult(
@@ -1226,49 +1581,41 @@ namespace AionToolLite.Services
         }
 
         // ==================== ATOMIC, SYMLINK-SAFE & LOCKED WINDOWS HOSTS MANAGER ====================
-        private async Task AtomicWriteHostsAsync(string content, CancellationToken token)
+        private async Task AtomicWriteHostsUnlockedAsync(string content, CancellationToken token)
         {
-            await _hostsLock.WaitAsync(token).ConfigureAwait(false);
-            try
+            if (File.Exists(_hostsPath) && IsReparsePoint(_hostsPath))
+                throw new IOException("Refused to modify hosts file because it is a symbolic link / reparse point.");
+
+            string dir = Path.GetDirectoryName(_hostsPath)!;
+            string tmp = Path.Combine(dir, $"hosts.aionlite.{Guid.NewGuid():N}.tmp");
+            var utf8NoBom = new UTF8Encoding(false);
+
+            for (int attempt = 1; attempt <= 3; attempt++)
             {
-                if (File.Exists(_hostsPath) && IsReparsePoint(_hostsPath))
-                    throw new IOException("Refused to modify hosts file because it is a symbolic link / reparse point.");
-
-                string dir = Path.GetDirectoryName(_hostsPath)!;
-                string tmp = Path.Combine(dir, $"hosts.aionlite.{Guid.NewGuid():N}.tmp");
-                var utf8NoBom = new UTF8Encoding(false);
-
-                for (int attempt = 1; attempt <= 3; attempt++)
+                try
                 {
-                    try
+                    await File.WriteAllTextAsync(tmp, content, utf8NoBom, token).ConfigureAwait(false);
+                    if (File.Exists(_hostsPath))
                     {
-                        await File.WriteAllTextAsync(tmp, content, utf8NoBom, token).ConfigureAwait(false);
-                        if (File.Exists(_hostsPath))
-                        {
-                            var attrs = File.GetAttributes(_hostsPath);
-                            if ((attrs & (FileAttributes.ReadOnly | FileAttributes.Hidden | FileAttributes.System)) != 0)
-                                File.SetAttributes(_hostsPath, FileAttributes.Normal);
-                            File.Replace(tmp, _hostsPath, null, ignoreMetadataErrors: true);
-                        }
-                        else
-                        {
-                            File.Move(tmp, _hostsPath);
-                        }
-                        return;
+                        var attrs = File.GetAttributes(_hostsPath);
+                        if ((attrs & (FileAttributes.ReadOnly | FileAttributes.Hidden | FileAttributes.System)) != 0)
+                            File.SetAttributes(_hostsPath, FileAttributes.Normal);
+                        File.Replace(tmp, _hostsPath, null, ignoreMetadataErrors: true);
                     }
-                    catch when (attempt < 3)
+                    else
                     {
-                        await Task.Delay(250, token).ConfigureAwait(false);
+                        File.Move(tmp, _hostsPath);
                     }
-                    finally
-                    {
-                        try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
-                    }
+                    return;
                 }
-            }
-            finally
-            {
-                _hostsLock.Release();
+                catch when (attempt < 3)
+                {
+                    await Task.Delay(250, token).ConfigureAwait(false);
+                }
+                finally
+                {
+                    try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                }
             }
         }
 
@@ -1279,12 +1626,10 @@ namespace AionToolLite.Services
             try
             {
                 if (!File.Exists(_hostsPath) || IsReparsePoint(_hostsPath)) return false;
-                string p1 = $"# AIONTOOL-BEGIN:{tag}";
-                string p2 = $"# {tag}-BEGIN";
+                string cleanTag = SanitizeHeaderToken(tag);
                 foreach (var raw in File.ReadLines(_hostsPath))
                 {
-                    string t = raw.Trim();
-                    if (t.StartsWith(p1, StringComparison.OrdinalIgnoreCase) || t.StartsWith(p2, StringComparison.OrdinalIgnoreCase))
+                    if (MatchesExactBlocklistBegin(raw.Trim(), cleanTag))
                         return true;
                 }
             }
@@ -1332,7 +1677,27 @@ namespace AionToolLite.Services
             });
         }
 
-        public Task<OperationResult> BackupHostsAsync()
+        private static void AtomicCopyFile(string sourcePath, string destPath)
+        {
+            if (File.Exists(destPath) && IsReparsePoint(destPath))
+                throw new IOException("Refused to overwrite symbolic link or reparse point.");
+
+            string tmp = destPath + $".{Guid.NewGuid():N}.tmp";
+            try
+            {
+                File.Copy(sourcePath, tmp, overwrite: true);
+                if (File.Exists(destPath))
+                    File.Replace(tmp, destPath, null, true);
+                else
+                    File.Move(tmp, destPath);
+            }
+            finally
+            {
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            }
+        }
+
+        public Task<OperationResult> BackupHostsAsync(bool isManual = true)
         {
             return Task.Run(() =>
             {
@@ -1340,23 +1705,49 @@ namespace AionToolLite.Services
                 {
                     try
                     {
-                        Directory.CreateDirectory(_cfgDir);
+                        string? stateDir = EnsureAdminOnlyStateDirectory();
+                        if (string.IsNullOrEmpty(stateDir))
+                            return new OperationResult(false, "Could not prepare verified admin-only backup folder.", "ایجاد یا تایید امنیت پوشه پشتیبان ناموفق بود.");
+
                         if (!File.Exists(_hostsPath) || IsReparsePoint(_hostsPath))
                             return new OperationResult(false, "Windows hosts file not found or unsafe.", "فایل hosts ویندوز پیدا نشد یا ایمن نیست.");
 
+                        // Immutable original snapshot captured once before AionTool's first modification
                         if (!File.Exists(HostsOriginalBackupPath))
-                            File.Copy(_hostsPath, HostsOriginalBackupPath, overwrite: false);
+                        {
+                            AtomicCopyFile(_hostsPath, HostsOriginalBackupPath);
+                        }
+                        if (!IsFileOwnedAndLockedByAdmins(HostsOriginalBackupPath, strictAdminOnly: true))
+                        {
+                            return new OperationResult(false, "Original hosts backup failed admin ownership/ACL verification.", "تایید امنیتی فایل پشتیبان اصلی hosts ناموفق بود.");
+                        }
 
-                        string stamped = Path.Combine(_cfgDir, $"hosts.backup.{DateTime.Now:yyyyMMdd_HHmmss}");
-                        File.Copy(_hostsPath, stamped, overwrite: true);
+                        // Explicit user-triggered backup is stored separately so automatic pre-apply backups never shadow it
+                        if (isManual)
+                        {
+                            if (File.Exists(HostsManualBackupPath) && !IsFileOwnedAndLockedByAdmins(HostsManualBackupPath, strictAdminOnly: true))
+                                return new OperationResult(false, "Manual hosts backup failed admin ownership/ACL verification.", "تایید امنیتی فایل پشتیبان دستی hosts ناموفق بود.");
 
-                        var oldBackups = Directory.GetFiles(_cfgDir, "hosts.backup.*")
-                            .Where(p => !p.EndsWith(".original", StringComparison.OrdinalIgnoreCase))
+                            AtomicCopyFile(_hostsPath, HostsManualBackupPath);
+                        }
+
+                        string stamped = Path.Combine(stateDir, $"hosts.backup.{DateTime.UtcNow:yyyyMMdd_HHmmss_fff}");
+                        AtomicCopyFile(_hostsPath, stamped);
+
+                        var oldBackups = Directory.GetFiles(stateDir, "hosts.backup.*")
+                            .Where(p => !p.EndsWith(".original", StringComparison.OrdinalIgnoreCase)
+                                     && !p.EndsWith(".manual", StringComparison.OrdinalIgnoreCase))
                             .OrderByDescending(File.GetLastWriteTimeUtc)
                             .Skip(MaxBackupsToKeep);
-                        foreach (var old in oldBackups) { try { File.Delete(old); } catch { } }
+                        foreach (var old in oldBackups)
+                        {
+                            try { if (!IsReparsePoint(old)) File.Delete(old); } catch { }
+                        }
 
-                        return new OperationResult(true, "Hosts backup saved!", "پشتیبان فایل hosts ذخیره شد!");
+                        return new OperationResult(
+                            true,
+                            isManual ? "Manual hosts backup saved!" : "Hosts backup saved!",
+                            isManual ? "پشتیبان دستی فایل hosts ذخیره شد!" : "پشتیبان فایل hosts ذخیره شد!");
                     }
                     catch (Exception ex)
                     {
@@ -1369,21 +1760,33 @@ namespace AionToolLite.Services
         public async Task<OperationResult> RestoreHostsAsync(CancellationToken token = default)
         {
             string? target = null;
+            bool restoredManual = false;
+            if (!IsDirectoryOwnedAndLockedByAdmins(_secureStateDir, strictAdminOnly: true))
+                return new OperationResult(false, "No verified admin-protected hosts backup found yet.", "پشتیبان تاییدشده و محافظت‌شده‌ای از فایل hosts یافت نشد.");
+
             lock (_ioLock)
             {
-                if (Directory.Exists(_cfgDir))
+                // Prefer an explicit user manual backup if present; otherwise restore the clean pre-modification original backup
+                // (never restore an intermediate auto-backup from a second blocklist apply!)
+                if (File.Exists(HostsManualBackupPath))
                 {
-                    target = Directory.GetFiles(_cfgDir, "hosts.backup.*")
-                        .Where(p => !p.EndsWith(".original", StringComparison.OrdinalIgnoreCase))
-                        .OrderByDescending(File.GetLastWriteTimeUtc)
+                    target = HostsManualBackupPath;
+                    restoredManual = true;
+                }
+                else if (File.Exists(HostsOriginalBackupPath))
+                {
+                    target = HostsOriginalBackupPath;
+                }
+                else if (Directory.Exists(_secureStateDir))
+                {
+                    target = Directory.GetFiles(_secureStateDir, "hosts.backup.*")
+                        .OrderBy(File.GetLastWriteTimeUtc)
                         .FirstOrDefault();
                 }
-                if (target == null && File.Exists(HostsOriginalBackupPath))
-                    target = HostsOriginalBackupPath;
             }
 
-            if (target == null || IsReparsePoint(target))
-                return new OperationResult(false, "No valid hosts backup found yet.", "پشتیبان معتبری از فایل hosts یافت نشد.");
+            if (target == null || !IsFileOwnedAndLockedByAdmins(target, strictAdminOnly: true))
+                return new OperationResult(false, "No verified admin-protected hosts backup found yet.", "پشتیبان تاییدشده و محافظت‌شده‌ای از فایل hosts یافت نشد.");
 
             try
             {
@@ -1395,9 +1798,20 @@ namespace AionToolLite.Services
                 if (content.IndexOf('\0') >= 0)
                     return new OperationResult(false, "Backup file is corrupted (binary data detected).", "فایل پشتیبان خراب است.");
 
-                await AtomicWriteHostsAsync(content, token).ConfigureAwait(false);
+                await _hostsLock.WaitAsync(token).ConfigureAwait(false);
+                try
+                {
+                    await AtomicWriteHostsUnlockedAsync(content, token).ConfigureAwait(false);
+                }
+                finally
+                {
+                    _hostsLock.Release();
+                }
                 await FastFlushDnsCacheAsync(token).ConfigureAwait(false);
-                return new OperationResult(true, "Hosts file restored from backup!", "فایل hosts از پشتیبان بازگردانی شد!");
+                return new OperationResult(
+                    true,
+                    restoredManual ? "Hosts restored from your manual backup!" : "Hosts restored to original pre-change backup!",
+                    restoredManual ? "فایل hosts از پشتیبان دستی شما بازگردانی شد!" : "فایل hosts به نسخه اصلی پیش از تغییرات بازگردانی شد!");
             }
             catch (Exception ex)
             {
@@ -1407,16 +1821,36 @@ namespace AionToolLite.Services
 
         public async Task<OperationResult> ResetHostsToDefaultAsync(CancellationToken token = default)
         {
-            await BackupHostsAsync().ConfigureAwait(false);
-            string defaultHosts =
-                "# Copyright (c) 1993-2009 Microsoft Corp.\r\n" +
-                "#\r\n" +
-                "# This is a sample HOSTS file used by Microsoft TCP/IP for Windows.\r\n" +
-                "# localhost name resolution is handled within DNS itself.\r\n" +
-                "#\t127.0.0.1       localhost\r\n" +
-                "#\t::1             localhost\r\n";
+            await _hostsLock.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                if (File.Exists(_hostsPath))
+                {
+                    var backupRes = await BackupHostsAsync(isManual: false).ConfigureAwait(false);
+                    if (!backupRes.Success)
+                    {
+                        return new OperationResult(
+                            false,
+                            $"Reset aborted: could not save hosts backup first ({backupRes.MessageEn}).",
+                            $"بازنشانی متوقف شد: ذخیره پشتیبان hosts ناموفق بود ({backupRes.MessageFa}).");
+                    }
+                }
 
-            await AtomicWriteHostsAsync(defaultHosts, token).ConfigureAwait(false);
+                string defaultHosts =
+                    "# Copyright (c) 1993-2009 Microsoft Corp.\r\n" +
+                    "#\r\n" +
+                    "# This is a sample HOSTS file used by Microsoft TCP/IP for Windows.\r\n" +
+                    "# localhost name resolution is handled within DNS itself.\r\n" +
+                    "#\t127.0.0.1       localhost\r\n" +
+                    "#\t::1             localhost\r\n";
+
+                await AtomicWriteHostsUnlockedAsync(defaultHosts, token).ConfigureAwait(false);
+            }
+            finally
+            {
+                _hostsLock.Release();
+            }
+
             await FastFlushDnsCacheAsync(token).ConfigureAwait(false);
             return new OperationResult(true, "Hosts file reset to Windows default!", "فایل hosts به حالت پیش‌فرض ویندوز برگشت!");
         }
@@ -1505,25 +1939,40 @@ namespace AionToolLite.Services
                 if (validEntries.Count == 0)
                     return new OperationResult(false, "No valid entries found in blocklist.", "هیچ قانون معتبری در لیست پیدا نشد.");
 
-                await BackupHostsAsync().ConfigureAwait(false);
+                await _hostsLock.WaitAsync(token).ConfigureAwait(false);
+                try
+                {
+                    var backupRes = await BackupHostsAsync(isManual: false).ConfigureAwait(false);
+                    if (!backupRes.Success)
+                    {
+                        return new OperationResult(
+                            false,
+                            $"Apply aborted: could not back up hosts first ({backupRes.MessageEn}).",
+                            $"اعمال لیست متوقف شد: پشتیبان‌گیری از hosts ناموفق بود ({backupRes.MessageFa}).");
+                    }
 
-                var existing = File.Exists(_hostsPath) && !IsReparsePoint(_hostsPath)
-                    ? (await File.ReadAllLinesAsync(_hostsPath, token).ConfigureAwait(false)).ToList()
-                    : new List<string>();
+                    var existing = File.Exists(_hostsPath) && !IsReparsePoint(_hostsPath)
+                        ? (await File.ReadAllLinesAsync(_hostsPath, token).ConfigureAwait(false)).ToList()
+                        : new List<string>();
 
-                string safeTag = SanitizeHeaderToken(item.Tag);
-                string safeName = SanitizeHeaderToken(item.Name);
+                    string safeTag = SanitizeHeaderToken(item.Tag);
+                    string safeName = SanitizeHeaderToken(item.Name);
 
-                var cleaned = StripBlocklistTagSafe(existing, safeTag);
-                var sb = new StringBuilder(cleaned.Count * 32 + validEntries.Count * 32);
-                foreach (var l in cleaned) sb.AppendLine(l);
-                if (cleaned.Count > 0 && !string.IsNullOrWhiteSpace(cleaned[^1])) sb.AppendLine();
+                    var cleaned = StripBlocklistTagSafe(existing, safeTag);
+                    var sb = new StringBuilder(cleaned.Count * 32 + validEntries.Count * 32);
+                    foreach (var l in cleaned) sb.AppendLine(l);
+                    if (cleaned.Count > 0 && !string.IsNullOrWhiteSpace(cleaned[^1])) sb.AppendLine();
 
-                sb.AppendLine($"# AIONTOOL-BEGIN:{safeTag}:{safeName}:{DateTime.Now:yyyy-MM-dd}");
-                foreach (var e in validEntries) sb.AppendLine(e);
-                sb.AppendLine($"# AIONTOOL-END:{safeTag}");
+                    sb.AppendLine($"# AIONTOOL-BEGIN:{safeTag}:{safeName}:{DateTime.Now:yyyy-MM-dd}");
+                    foreach (var e in validEntries) sb.AppendLine(e);
+                    sb.AppendLine($"# AIONTOOL-END:{safeTag}");
 
-                await AtomicWriteHostsAsync(sb.ToString(), token).ConfigureAwait(false);
+                    await AtomicWriteHostsUnlockedAsync(sb.ToString(), token).ConfigureAwait(false);
+                }
+                finally
+                {
+                    _hostsLock.Release();
+                }
                 await FastFlushDnsCacheAsync(token).ConfigureAwait(false);
 
                 return new OperationResult(
@@ -1539,23 +1988,44 @@ namespace AionToolLite.Services
 
         public async Task<OperationResult> RemoveBlocklistByTagAsync(string tag, string label, CancellationToken token = default)
         {
-            if (!File.Exists(_hostsPath) || IsReparsePoint(_hostsPath))
-                return new OperationResult(false, "Windows hosts file not found or unsafe.", "فایل hosts ویندوز یافت نشد یا ایمن نیست.");
+            await _hostsLock.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                if (!File.Exists(_hostsPath) || IsReparsePoint(_hostsPath))
+                    return new OperationResult(false, "Windows hosts file not found or unsafe.", "فایل hosts ویندوز یافت نشد یا ایمن نیست.");
 
-            var existing = (await File.ReadAllLinesAsync(_hostsPath, token).ConfigureAwait(false)).ToList();
-            var cleaned = StripBlocklistTagSafe(existing, SanitizeHeaderToken(tag));
+                var existing = (await File.ReadAllLinesAsync(_hostsPath, token).ConfigureAwait(false)).ToList();
+                var cleaned = StripBlocklistTagSafe(existing, SanitizeHeaderToken(tag));
 
-            if (cleaned.Count == existing.Count)
-                return new OperationResult(true, $"{label} was not installed.", $"{label} در فایل hosts وجود نداشت.");
+                if (cleaned.Count == existing.Count)
+                    return new OperationResult(true, $"{label} was not installed.", $"{label} در فایل hosts وجود نداشت.");
 
-            await AtomicWriteHostsAsync(string.Join(Environment.NewLine, cleaned) + Environment.NewLine, token).ConfigureAwait(false);
+                await AtomicWriteHostsUnlockedAsync(string.Join(Environment.NewLine, cleaned) + Environment.NewLine, token).ConfigureAwait(false);
+            }
+            finally
+            {
+                _hostsLock.Release();
+            }
+
             await FastFlushDnsCacheAsync(token).ConfigureAwait(false);
             return new OperationResult(true, $"Removed {label} from hosts.", $"{label} از فایل hosts حذف شد.");
         }
 
+        private static bool MatchesExactBlocklistBegin(string trimmedLine, string tag)
+        {
+            string aion = $"# AIONTOOL-BEGIN:{tag}";
+            string aio = $"# AIOTOOL-BEGIN:{tag}";
+            string legacy = $"# {tag}-BEGIN";
+
+            return trimmedLine.Equals(aion, StringComparison.OrdinalIgnoreCase)
+                || trimmedLine.StartsWith(aion + ":", StringComparison.OrdinalIgnoreCase)
+                || trimmedLine.Equals(aio, StringComparison.OrdinalIgnoreCase)
+                || trimmedLine.StartsWith(aio + ":", StringComparison.OrdinalIgnoreCase)
+                || trimmedLine.Equals(legacy, StringComparison.OrdinalIgnoreCase);
+        }
+
         private static List<string> StripBlocklistTagSafe(IReadOnlyList<string> lines, string tag)
         {
-            string[] beginPrefixes = { $"# AIONTOOL-BEGIN:{tag}", $"# AIOTOOL-BEGIN:{tag}", $"# {tag}-BEGIN" };
             string[] endExacts = { $"# AIONTOOL-END:{tag}", $"# AIOTOOL-END:{tag}", $"# {tag}-END" };
 
             var output = new List<string>(lines.Count);
@@ -1563,7 +2033,7 @@ namespace AionToolLite.Services
             while (i < lines.Count)
             {
                 string t = lines[i].Trim();
-                if (beginPrefixes.Any(p => t.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+                if (MatchesExactBlocklistBegin(t, tag))
                 {
                     int endIdx = -1;
                     for (int j = i + 1; j < lines.Count; j++)
@@ -1581,6 +2051,116 @@ namespace AionToolLite.Services
                 i++;
             }
             return output;
+        }
+
+        private static List<string> StripAllManagedBlocklistsSafe(IReadOnlyList<string> lines)
+        {
+            var output = new List<string>(lines.Count);
+            int i = 0;
+            while (i < lines.Count)
+            {
+                string t = lines[i].Trim();
+                if (t.StartsWith("# AIONTOOL-BEGIN:", StringComparison.OrdinalIgnoreCase) ||
+                    t.StartsWith("# AIOTOOL-BEGIN:", StringComparison.OrdinalIgnoreCase))
+                {
+                    int colon1 = t.IndexOf(':');
+                    string rest = colon1 >= 0 ? t[(colon1 + 1)..] : string.Empty;
+                    int colon2 = rest.IndexOf(':');
+                    string tag = colon2 >= 0 ? rest[..colon2] : rest;
+                    string endAion = $"# AIONTOOL-END:{tag}";
+                    string endAio = $"# AIOTOOL-END:{tag}";
+
+                    int endIdx = -1;
+                    for (int j = i + 1; j < lines.Count; j++)
+                    {
+                        string t2 = lines[j].Trim();
+                        if (t2.Equals(endAion, StringComparison.OrdinalIgnoreCase) ||
+                            t2.Equals(endAio, StringComparison.OrdinalIgnoreCase))
+                        {
+                            endIdx = j;
+                            break;
+                        }
+                    }
+                    if (endIdx >= 0) { i = endIdx + 1; continue; }
+                }
+                output.Add(lines[i]);
+                i++;
+            }
+            return output;
+        }
+
+        // ==================== UNINSTALL CLEANUP (MEDIUM #10) ====================
+        public async Task PerformUninstallCleanupAsync(CancellationToken token = default)
+        {
+            try
+            {
+                Dictionary<string, OriginalDnsBackup>? dnsMap = null;
+                lock (_ioLock)
+                {
+                    string? json = ReadAdminVerifiedSmallJsonTextSafe(OriginalDnsBackupPath);
+                    if (!string.IsNullOrEmpty(json))
+                        dnsMap = JsonSerializer.Deserialize<Dictionary<string, OriginalDnsBackup>>(json);
+                }
+
+                if (dnsMap != null)
+                {
+                    foreach (var adapterName in dnsMap.Keys.ToList())
+                    {
+                        try { await RestoreOriginalDnsAsync(adapterName, token).ConfigureAwait(false); } catch { }
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                bool restoredOriginal = false;
+                if (IsDirectoryOwnedAndLockedByAdmins(_secureStateDir, strictAdminOnly: true) &&
+                    File.Exists(HostsOriginalBackupPath) &&
+                    IsFileOwnedAndLockedByAdmins(HostsOriginalBackupPath, strictAdminOnly: true))
+                {
+                    var fi = new FileInfo(HostsOriginalBackupPath);
+                    if (fi.Length <= MaxBlocklistBytes)
+                    {
+                        string content = await File.ReadAllTextAsync(HostsOriginalBackupPath, token).ConfigureAwait(false);
+                        if (content.IndexOf('\0') < 0)
+                        {
+                            await _hostsLock.WaitAsync(token).ConfigureAwait(false);
+                            try { await AtomicWriteHostsUnlockedAsync(content, token).ConfigureAwait(false); }
+                            finally { _hostsLock.Release(); }
+                            restoredOriginal = true;
+                        }
+                    }
+                }
+
+                if (!restoredOriginal && File.Exists(_hostsPath) && !IsReparsePoint(_hostsPath))
+                {
+                    await _hostsLock.WaitAsync(token).ConfigureAwait(false);
+                    try
+                    {
+                        var existing = (await File.ReadAllLinesAsync(_hostsPath, token).ConfigureAwait(false)).ToList();
+                        var cleaned = StripAllManagedBlocklistsSafe(existing);
+                        if (cleaned.Count != existing.Count)
+                        {
+                            await AtomicWriteHostsUnlockedAsync(string.Join(Environment.NewLine, cleaned) + Environment.NewLine, token).ConfigureAwait(false);
+                        }
+                    }
+                    finally
+                    {
+                        _hostsLock.Release();
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (IsGameModeActive())
+                    await SetGameModeAsync(false, token).ConfigureAwait(false);
+            }
+            catch { }
+
+            await FastFlushDnsCacheAsync(token).ConfigureAwait(false);
         }
 
         // ==================== EXTRA COMPACT UTILITIES (PUBLIC IP & SYMLINK-SAFE TEMP CLEAN) ====================
@@ -1609,54 +2189,105 @@ namespace AionToolLite.Services
             }
         }
 
+        private static void CleanTempDirectoryTreeSafely(
+            string dirPath,
+            DateTime cutoff,
+            bool removeDirIfEmpty,
+            int remainingDepth,
+            ref int deletedFiles,
+            ref int deletedDirs,
+            ref long freedBytes)
+        {
+            if (remainingDepth < 0 || !Directory.Exists(dirPath) || IsReparsePoint(dirPath))
+                return;
+
+            // 1. Delete only individual files whose creation AND last-write timestamps are older than cutoff (never follows symlinks)
+            try
+            {
+                foreach (var f in Directory.EnumerateFiles(dirPath))
+                {
+                    try
+                    {
+                        var fi = new FileInfo(f);
+                        if ((fi.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+                        if (fi.LastWriteTimeUtc >= cutoff || fi.CreationTimeUtc >= cutoff) continue;
+                        long len = fi.Length;
+                        File.Delete(f);
+                        deletedFiles++;
+                        freedBytes += len;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            // 2. Descend into non-reparse subdirectories safely (never uses recursive Directory.Delete!)
+            try
+            {
+                foreach (var sub in Directory.EnumerateDirectories(dirPath))
+                {
+                    try
+                    {
+                        var di = new DirectoryInfo(sub);
+                        if ((di.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+                        // Preserve .NET single-file native extraction cache folder
+                        if (di.Name.Equals(".net", StringComparison.OrdinalIgnoreCase)) continue;
+
+                        CleanTempDirectoryTreeSafely(sub, cutoff, removeDirIfEmpty: true, remainingDepth - 1, ref deletedFiles, ref deletedDirs, ref freedBytes);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            // 3. Remove subdirectory ONLY if it is now completely empty and older than cutoff (non-recursive delete)
+            if (removeDirIfEmpty)
+            {
+                try
+                {
+                    var di = new DirectoryInfo(dirPath);
+                    if ((di.Attributes & FileAttributes.ReparsePoint) != 0) return;
+                    if (di.LastWriteTimeUtc >= cutoff || di.CreationTimeUtc >= cutoff) return;
+                    if (!Directory.EnumerateFileSystemEntries(dirPath).Any())
+                    {
+                        Directory.Delete(dirPath, recursive: false);
+                        deletedDirs++;
+                    }
+                }
+                catch { }
+            }
+        }
+
         public async Task<OperationResult> CleanOldTempFilesAsync()
         {
-            int deleted = 0;
+            int deletedFiles = 0;
+            int deletedDirs = 0;
             long bytes = 0;
             DateTime cutoff = DateTime.UtcNow.AddHours(-24);
 
             await Task.Run(() =>
             {
-                string[] folders = { Path.GetTempPath(), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Temp") };
-                foreach (var dir in folders.Where(d => Directory.Exists(d) && !IsReparsePoint(d)))
+                var roots = new[]
                 {
-                    foreach (var f in Directory.GetFiles(dir))
-                    {
-                        try
-                        {
-                            var fi = new FileInfo(f);
-                            // Security: never follow or delete symlink/reparse files while running elevated
-                            if ((fi.Attributes & FileAttributes.ReparsePoint) != 0) continue;
-                            if (fi.LastWriteTimeUtc >= cutoff) continue;
-                            long len = fi.Length;
-                            File.Delete(f);
-                            deleted++;
-                            bytes += len;
-                        }
-                        catch { }
-                    }
-                    foreach (var sub in Directory.GetDirectories(dir))
-                    {
-                        try
-                        {
-                            var di = new DirectoryInfo(sub);
-                            if ((di.Attributes & FileAttributes.ReparsePoint) != 0) continue;
-                            // Preserve .NET single-file native extraction cache folder
-                            if (di.Name.Equals(".net", StringComparison.OrdinalIgnoreCase)) continue;
-                            if (di.LastWriteTimeUtc >= cutoff) continue;
-                            Directory.Delete(sub, true);
-                            deleted++;
-                        }
-                        catch { }
-                    }
+                    Path.GetTempPath(),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Temp")
+                }
+                .Where(d => !string.IsNullOrWhiteSpace(d))
+                .Select(d => Path.GetFullPath(d).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(d => Directory.Exists(d) && !IsReparsePoint(d));
+
+                foreach (var dir in roots)
+                {
+                    CleanTempDirectoryTreeSafely(dir, cutoff, removeDirIfEmpty: false, remainingDepth: 16, ref deletedFiles, ref deletedDirs, ref bytes);
                 }
             }).ConfigureAwait(false);
 
             double mb = Math.Round(bytes / 1048576.0, 1);
             return new OperationResult(
                 true,
-                $"Cleaned {deleted} old temp items (~{mb:F1} MB).",
-                $"{deleted} فایل موقت قدیمی پاکسازی شد (~{mb:F1} مگابایت).");
+                $"Cleaned {deletedFiles} old files & {deletedDirs} empty folders (~{mb:F1} MB).",
+                $"{deletedFiles} فایل قدیمی و {deletedDirs} پوشه خالی پاکسازی شد (~{mb:F1} مگابایت).");
         }
 
         // ==================== QUICK 6-SECOND SPEED CHECK ====================
@@ -1768,28 +2399,49 @@ namespace AionToolLite.Services
                 var g = tGlobal.Result;
                 (double LossPct, long? AvgMs, long? JitterMs)? r = tRouter != null ? tRouter.Result : null;
 
+                bool routerBlockedIcmp = r.HasValue && !r.Value.AvgMs.HasValue && r.Value.LossPct >= 99.9 && g.AvgMs.HasValue;
+                bool routerPartialInstability = r.HasValue && r.Value.AvgMs.HasValue && (r.Value.LossPct >= 5.0 || (r.Value.JitterMs ?? 0) >= 15);
+                bool bothOffline = r.HasValue && !r.Value.AvgMs.HasValue && !g.AvgMs.HasValue;
+
                 string verdictEn;
                 string verdictFa;
 
-                if (r.HasValue && (r.Value.LossPct >= 5.0 || (r.Value.JitterMs ?? 0) >= 15))
+                if (bothOffline)
+                {
+                    verdictEn = "No reply from Modem or Internet (check connection)";
+                    verdictFa = "پاسخی از مودم و اینترنت دریافت نشد (اتصال را چک کنید)";
+                }
+                else if (routerPartialInstability)
                 {
                     verdictEn = "Local Wi-Fi / Modem instability detected";
                     verdictFa = "ناپایداری داخلی است (وای‌فای یا مودم شما)";
                 }
                 else if (!g.AvgMs.HasValue || g.LossPct >= 5.0 || (g.JitterMs ?? 0) >= 25)
                 {
-                    verdictEn = "Modem OK · ISP / Internet unstable";
-                    verdictFa = "مودم سالم · ناپایداری از اینترنت / ISP";
+                    verdictEn = routerBlockedIcmp
+                        ? "Modem blocks ping · ISP / Internet unstable"
+                        : "Modem OK · ISP / Internet unstable";
+                    verdictFa = routerBlockedIcmp
+                        ? "پینگ مودم بسته است · ناپایداری از اینترنت / ISP"
+                        : "مودم سالم · ناپایداری از اینترنت / ISP";
                 }
                 else if (g.LossPct == 0 && (g.JitterMs ?? 0) <= 12)
                 {
-                    verdictEn = "Rock-solid for gaming!";
-                    verdictFa = "عالی و کاملاً پایدار برای گیم!";
+                    verdictEn = routerBlockedIcmp
+                        ? "Modem blocks ping · Internet rock-solid for gaming!"
+                        : "Rock-solid for gaming!";
+                    verdictFa = routerBlockedIcmp
+                        ? "پینگ مودم بسته است · اینترنت عالی و پایدار برای گیم!"
+                        : "عالی و کاملاً پایدار برای گیم!";
                 }
                 else
                 {
-                    verdictEn = "Good line stability";
-                    verdictFa = "پایداری خط مناسب است";
+                    verdictEn = routerBlockedIcmp
+                        ? "Modem blocks ping · Good internet stability"
+                        : "Good line stability";
+                    verdictFa = routerBlockedIcmp
+                        ? "پینگ مودم بسته است · پایداری اینترنت مناسب است"
+                        : "پایداری خط مناسب است";
                 }
 
                 return new StabilityCheckResult(
@@ -1802,7 +2454,8 @@ namespace AionToolLite.Services
                     RouterAvgMs: r?.AvgMs,
                     RouterJitterMs: r?.JitterMs,
                     VerdictEn: verdictEn,
-                    VerdictFa: verdictFa);
+                    VerdictFa: verdictFa,
+                    RouterBlockedIcmp: routerBlockedIcmp);
             }
             catch (OperationCanceledException)
             {
@@ -1838,55 +2491,435 @@ namespace AionToolLite.Services
                 || host.EndsWith(".githubusercontent.com", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static string? ParseExpectedSha256(string checksumText, string targetFileName)
+        private static readonly Guid WinTrustActionGenericVerifyV2 = new("00AAC56B-CD44-11d0-8CC2-00C04FC295EE");
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WinTrustFileInfo
         {
-            var hex64 = new Regex(@"\b[a-fA-F0-9]{64}\b");
+            public uint cbStruct;
+            public IntPtr pcwszFilePath;
+            public IntPtr hFile;
+            public IntPtr pgKnownSubject;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WinTrustData
+        {
+            public uint cbStruct;
+            public IntPtr pPolicyCallbackData;
+            public IntPtr pSIPClientData;
+            public uint dwUIChoice;
+            public uint fdwRevocationChecks;
+            public uint dwUnionChoice;
+            public IntPtr pFile;
+            public uint dwStateAction;
+            public IntPtr hWVTStateData;
+            public IntPtr pwszURLReference;
+            public uint dwProvFlags;
+            public uint dwUIContext;
+            public IntPtr pSignatureSettings;
+        }
+
+        [DllImport("wintrust.dll", ExactSpelling = true, SetLastError = false, CharSet = CharSet.Unicode)]
+        private static extern int WinVerifyTrust(IntPtr hwnd, [MarshalAs(UnmanagedType.LPStruct)] Guid pgActionID, ref WinTrustData pWVTData);
+
+        private static bool VerifyAuthenticodeSignature(string filePath)
+        {
+            IntPtr pathPtr = IntPtr.Zero;
+            IntPtr fileInfoPtr = IntPtr.Zero;
+            try
+            {
+                pathPtr = Marshal.StringToCoTaskMemUni(filePath);
+                var fileInfo = new WinTrustFileInfo
+                {
+                    cbStruct = (uint)Marshal.SizeOf<WinTrustFileInfo>(),
+                    pcwszFilePath = pathPtr,
+                    hFile = IntPtr.Zero,
+                    pgKnownSubject = IntPtr.Zero
+                };
+
+                fileInfoPtr = Marshal.AllocCoTaskMem(Marshal.SizeOf<WinTrustFileInfo>());
+                Marshal.StructureToPtr(fileInfo, fileInfoPtr, false);
+
+                var data = new WinTrustData
+                {
+                    cbStruct = (uint)Marshal.SizeOf<WinTrustData>(),
+                    pPolicyCallbackData = IntPtr.Zero,
+                    pSIPClientData = IntPtr.Zero,
+                    dwUIChoice = 2,          // WTD_UI_NONE
+                    fdwRevocationChecks = 1, // WTD_REVOKE_WHOLECHAIN
+                    dwUnionChoice = 1,       // WTD_CHOICE_FILE
+                    pFile = fileInfoPtr,
+                    dwStateAction = 1,       // WTD_STATEACTION_VERIFY
+                    hWVTStateData = IntPtr.Zero,
+                    pwszURLReference = IntPtr.Zero,
+                    dwProvFlags = 0x00000040, // WTD_REVOCATION_CHECK_CHAIN
+                    dwUIContext = 0,
+                    pSignatureSettings = IntPtr.Zero
+                };
+
+                int status = WinVerifyTrust(IntPtr.Zero, WinTrustActionGenericVerifyV2, ref data);
+                data.dwStateAction = 2; // WTD_STATEACTION_CLOSE
+                try { WinVerifyTrust(IntPtr.Zero, WinTrustActionGenericVerifyV2, ref data); } catch { }
+                return status == 0;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                if (fileInfoPtr != IntPtr.Zero) Marshal.FreeCoTaskMem(fileInfoPtr);
+                if (pathPtr != IntPtr.Zero) Marshal.FreeCoTaskMem(pathPtr);
+            }
+        }
+
+        private static string? TryGetAuthenticodeThumbprint(string filePath)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return null;
+                using var baseCert = X509Certificate.CreateFromSignedFile(filePath);
+                using var cert = new X509Certificate2(baseCert);
+                return cert.Thumbprint;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static bool HasPinnedReleasePublicKey() =>
+            !string.IsNullOrWhiteSpace(PinnedReleaseRsaModulusBase64) &&
+            !string.IsNullOrWhiteSpace(PinnedReleaseRsaExponentBase64);
+
+        private static bool VerifyDetachedRsaSignature(byte[] payloadBytes, byte[] signatureAssetBytes)
+        {
+            if (!HasPinnedReleasePublicKey() || payloadBytes.Length == 0 || signatureAssetBytes.Length == 0)
+                return false;
+
+            try
+            {
+                byte[] sigBytes;
+                string asText = Encoding.UTF8.GetString(signatureAssetBytes).Trim();
+                if (asText.Length > 0 && asText.All(c => char.IsLetterOrDigit(c) || c == '+' || c == '/' || c == '=' || char.IsWhiteSpace(c)))
+                {
+                    sigBytes = Convert.FromBase64String(Regex.Replace(asText, @"\s+", string.Empty));
+                }
+                else
+                {
+                    sigBytes = signatureAssetBytes;
+                }
+
+                using var rsa = RSA.Create();
+                rsa.ImportParameters(new RSAParameters
+                {
+                    Modulus = Convert.FromBase64String(PinnedReleaseRsaModulusBase64),
+                    Exponent = Convert.FromBase64String(PinnedReleaseRsaExponentBase64)
+                });
+
+                return rsa.VerifyData(payloadBytes, sigBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static async Task<(bool Ok, byte[] Data, string ErrorEn, string ErrorFa)> DownloadSmallTrustedGitHubAssetAsync(
+            Uri uri, long maxBytes, CancellationToken token)
+        {
+            using var resp = await SharedHttp.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+                return (false, Array.Empty<byte>(), "Failed to download verification file from GitHub.", "دانلود فایل تایید امنیتی از گیت‌هاب ناموفق بود.");
+
+            var finalUri = resp.RequestMessage?.RequestUri;
+            if (finalUri == null || finalUri.Scheme != Uri.UriSchemeHttps || !IsTrustedGitHubHost(finalUri.Host))
+                return (false, Array.Empty<byte>(), "Update aborted: untrusted verification redirect.", "آپدیت متوقف شد: ریدایرکت نامعتبر در فایل تایید امنیتی.");
+
+            if (resp.Content.Headers.ContentLength > maxBytes)
+                return (false, Array.Empty<byte>(), "Update aborted: verification file exceeds safety limit.", "آپدیت متوقف شد: حجم فایل تایید امنیتی بیش از حد مجاز است.");
+
+            await using var stream = await resp.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+            using var ms = new MemoryStream();
+            byte[] buf = new byte[8192];
+            long total = 0;
+            int read;
+            while ((read = await stream.ReadAsync(buf.AsMemory(), token).ConfigureAwait(false)) > 0)
+            {
+                total += read;
+                if (total > maxBytes)
+                    return (false, Array.Empty<byte>(), "Update aborted: verification file exceeds safety limit.", "آپدیت متوقف شد: حجم فایل تایید امنیتی بیش از حد مجاز است.");
+                ms.Write(buf, 0, read);
+            }
+            return (true, ms.ToArray(), string.Empty, string.Empty);
+        }
+
+        private static byte[]? ParseExpectedSha256Bytes(string checksumText, string targetFileName, string checksumAssetName)
+        {
+            var exactHex64 = new Regex(@"^[a-fA-F0-9]{64}$");
             var lines = checksumText.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
             foreach (var raw in lines)
             {
-                if (raw.Contains(targetFileName, StringComparison.OrdinalIgnoreCase))
+                string trimmed = raw.Trim();
+                if (trimmed.Length == 0 || trimmed[0] == '#') continue;
+
+                var parts = trimmed.Split(new[] { ' ', '\t' }, 2, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 2 && exactHex64.IsMatch(parts[0]))
                 {
-                    var m = hex64.Match(raw);
-                    if (m.Success) return m.Value.ToLowerInvariant();
+                    string entryFile = parts[1].Trim().TrimStart('*');
+                    if (entryFile.StartsWith("./", StringComparison.Ordinal) || entryFile.StartsWith(".\\", StringComparison.Ordinal))
+                        entryFile = entryFile[2..];
+
+                    if (entryFile.Equals(targetFileName, StringComparison.OrdinalIgnoreCase) ||
+                        Path.GetFileName(entryFile).Equals(targetFileName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return Convert.FromHexString(parts[0]);
+                    }
                 }
             }
-            if (lines.Length == 1)
+
+            // Allow a single bare 64-hex hash ONLY when the file is specifically named "<installer>.sha256"
+            if (lines.Length == 1 &&
+                checksumAssetName.Equals($"{targetFileName}.sha256", StringComparison.OrdinalIgnoreCase) &&
+                exactHex64.IsMatch(lines[0].Trim()))
             {
-                var m = hex64.Match(lines[0]);
-                if (m.Success) return m.Value.ToLowerInvariant();
+                return Convert.FromHexString(lines[0].Trim());
             }
+
             return null;
         }
 
-        private async Task<string?> PrepareAdminOnlyUpdateDirectoryAsync(CancellationToken token)
+        private static readonly SecurityIdentifier LocalSystemSid = new(WellKnownSidType.LocalSystemSid, null);
+        private static readonly SecurityIdentifier BuiltinAdminsSid = new(WellKnownSidType.BuiltinAdministratorsSid, null);
+        private static readonly SecurityIdentifier TrustedInstallerSid = new("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464");
+        private static readonly SecurityIdentifier CreatorOwnerSid = new(WellKnownSidType.CreatorOwnerSid, null);
+
+        private static bool IsTrustedAdminSid(SecurityIdentifier? sid)
         {
-            string parentDir = Path.GetDirectoryName(_secureUpdatesDir)!;
-            if (Directory.Exists(parentDir) && IsReparsePoint(parentDir))
-                return null;
-            if (Directory.Exists(_secureUpdatesDir) && IsReparsePoint(_secureUpdatesDir))
-                return null;
+            if (sid == null) return false;
+            return sid.Equals(LocalSystemSid)
+                || sid.Equals(BuiltinAdminsSid)
+                || sid.Equals(TrustedInstallerSid);
+        }
 
-            Directory.CreateDirectory(_secureUpdatesDir);
+        private static DirectorySecurity BuildAdminOnlyDirectorySecurity()
+        {
+            var sec = new DirectorySecurity();
+            sec.SetOwner(BuiltinAdminsSid);
+            sec.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            sec.AddAccessRule(new FileSystemAccessRule(
+                LocalSystemSid,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            sec.AddAccessRule(new FileSystemAccessRule(
+                BuiltinAdminsSid,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            return sec;
+        }
 
-            // Lock NTFS ACL strictly to SYSTEM (*S-1-5-18) and Administrators (*S-1-5-32-544) — prevents TOCTOU LPE!
-            var aclRes = await _runner.RunAsync("icacls", new[]
+        private static bool IsAclOwnedAndNonUserWritable(FileSystemSecurity sec, bool strictAdminOnly)
+        {
+            // 1. Owner MUST be SYSTEM, Builtin Administrators, or TrustedInstaller (prevents owner WRITE_DAC bypass!)
+            var ownerSid = sec.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+            if (!IsTrustedAdminSid(ownerSid))
+                return false;
+
+            // 2. Verify DACL grants no write/modify/delete/ownership/generic-write rights to any non-admin principal
+            const FileSystemRights dangerousRights =
+                FileSystemRights.WriteData |
+                FileSystemRights.AppendData |
+                FileSystemRights.WriteExtendedAttributes |
+                FileSystemRights.DeleteSubdirectoriesAndFiles |
+                FileSystemRights.WriteAttributes |
+                FileSystemRights.Delete |
+                FileSystemRights.ChangePermissions |
+                FileSystemRights.TakeOwnership;
+
+            var rules = sec.GetAccessRules(includeExplicit: true, includeInherited: true, typeof(SecurityIdentifier));
+            foreach (FileSystemAccessRule rule in rules)
             {
-                _secureUpdatesDir,
-                "/inheritance:r",
-                "/grant:r", "*S-1-5-18:(OI)(CI)F",
-                "/grant:r", "*S-1-5-32-544:(OI)(CI)F"
-            }, token, TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                if (rule.AccessControlType != AccessControlType.Allow)
+                    continue;
 
-            if (!aclRes.IsSuccess)
-                return null;
+                var sid = rule.IdentityReference as SecurityIdentifier;
+                if (IsTrustedAdminSid(sid))
+                    continue;
 
-            // Clean any leftover update installers from prior runs
-            foreach (var oldFile in Directory.GetFiles(_secureUpdatesDir, "update_*.exe"))
-            {
-                try { if (!IsReparsePoint(oldFile)) File.Delete(oldFile); } catch { }
+                if (strictAdminOnly)
+                    return false;
+
+                // Standard Program Files includes an InheritOnly CREATOR OWNER ACE; ignore inherit-only CreatorOwner
+                bool isInheritOnly = (rule.PropagationFlags & PropagationFlags.InheritOnly) != 0;
+                if (isInheritOnly && sid != null && sid.Equals(CreatorOwnerSid))
+                    continue;
+
+                int rawMask = unchecked((int)rule.FileSystemRights);
+                bool hasGenericWrite = (rawMask & (0x10000000 | 0x40000000)) != 0; // GENERIC_ALL | GENERIC_WRITE
+                if (hasGenericWrite || (rule.FileSystemRights & dangerousRights) != 0)
+                    return false;
             }
 
-            return _secureUpdatesDir;
+            return true;
+        }
+
+        private static bool IsDirectoryOwnedAndLockedByAdmins(string dirPath, bool strictAdminOnly)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(dirPath) || !Directory.Exists(dirPath) || IsReparsePoint(dirPath))
+                    return false;
+
+                var di = new DirectoryInfo(dirPath);
+                var sec = di.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+                return IsAclOwnedAndNonUserWritable(sec, strictAdminOnly);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool IsFileOwnedAndLockedByAdmins(string filePath, bool strictAdminOnly = false)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath) || IsReparsePoint(filePath))
+                    return false;
+
+                var fi = new FileInfo(filePath);
+                var sec = fi.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+                return IsAclOwnedAndNonUserWritable(sec, strictAdminOnly);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static string EnsureTrailingSeparator(string path)
+        {
+            string full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return full + Path.DirectorySeparatorChar;
+        }
+
+        private static bool IsExecutableSafeForElevatedAutoStart(string exePath)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(exePath) || !Path.IsPathRooted(exePath) || exePath.StartsWith(@"\", StringComparison.Ordinal))
+                    return false;
+
+                string fullExe = Path.GetFullPath(exePath);
+                if (!File.Exists(fullExe) || IsReparsePoint(fullExe))
+                    return false;
+
+                // 1. Must reside inside Program Files or Program Files (x86)
+                string[] allowedRoots =
+                {
+                    Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                    Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
+                };
+
+                string? matchedRoot = null;
+                foreach (var root in allowedRoots)
+                {
+                    if (string.IsNullOrWhiteSpace(root)) continue;
+                    string rootWithSep = EnsureTrailingSeparator(root);
+                    if (fullExe.StartsWith(rootWithSep, StringComparison.OrdinalIgnoreCase))
+                    {
+                        matchedRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                        break;
+                    }
+                }
+
+                if (string.IsNullOrEmpty(matchedRoot))
+                    return false;
+
+                // 2. Verify executable file itself is admin-owned and not writable by standard users
+                if (!IsFileOwnedAndLockedByAdmins(fullExe, strictAdminOnly: false))
+                    return false;
+
+                // 3. Verify every directory from the exe's folder up through Program Files is admin-owned, non-symlink, and non-user-writable
+                string? currentDir = Path.GetDirectoryName(fullExe);
+                while (!string.IsNullOrEmpty(currentDir))
+                {
+                    string normalizedDir = Path.GetFullPath(currentDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    if (!IsDirectoryOwnedAndLockedByAdmins(normalizedDir, strictAdminOnly: false))
+                        return false;
+
+                    if (normalizedDir.Equals(matchedRoot, StringComparison.OrdinalIgnoreCase))
+                        return true;
+
+                    currentDir = Path.GetDirectoryName(normalizedDir);
+                }
+
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private string? PrepareAdminOnlyUpdateDirectory()
+        {
+            try
+            {
+                string programFilesDir = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+                string appDir = Path.GetDirectoryName(_secureUpdatesDir)!;
+
+                // Verify Program Files itself is admin/TrustedInstaller-owned and not writable by standard users
+                if (!IsDirectoryOwnedAndLockedByAdmins(programFilesDir, strictAdminOnly: false))
+                    return null;
+
+                // Ensure %ProgramFiles%\AionToolLite exists and is admin-owned / non-user-writable
+                if (!Directory.Exists(appDir))
+                {
+                    FileSystemAclExtensions.CreateDirectory(BuildAdminOnlyDirectorySecurity(), appDir);
+                }
+                if (!IsDirectoryOwnedAndLockedByAdmins(appDir, strictAdminOnly: false))
+                    return null;
+
+                // Ensure %ProgramFiles%\AionToolLite\Updates exists with strict admin-only ACL & owner
+                if (!Directory.Exists(_secureUpdatesDir))
+                {
+                    FileSystemAclExtensions.CreateDirectory(BuildAdminOnlyDirectorySecurity(), _secureUpdatesDir);
+                }
+                if (!IsDirectoryOwnedAndLockedByAdmins(_secureUpdatesDir, strictAdminOnly: true))
+                    return null;
+
+                // Clean leftover staging folders/files from prior runs
+                foreach (var oldDir in Directory.GetDirectories(_secureUpdatesDir, "stage_*"))
+                {
+                    try { if (!IsReparsePoint(oldDir)) Directory.Delete(oldDir, recursive: true); } catch { }
+                }
+                foreach (var oldFile in Directory.GetFiles(_secureUpdatesDir, "update_*.exe"))
+                {
+                    try { if (!IsReparsePoint(oldFile)) File.Delete(oldFile); } catch { }
+                }
+
+                // Atomically create a fresh randomly named staging directory born with admin-only ACL & owner (zero TOCTOU)
+                string stageDir = Path.Combine(_secureUpdatesDir, $"stage_{Guid.NewGuid():N}");
+                FileSystemAclExtensions.CreateDirectory(BuildAdminOnlyDirectorySecurity(), stageDir);
+
+                if (!IsDirectoryOwnedAndLockedByAdmins(stageDir, strictAdminOnly: true))
+                {
+                    try { Directory.Delete(stageDir, recursive: true); } catch { }
+                    return null;
+                }
+
+                return stageDir;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         public async Task<(bool HasUpdate, string LatestVersion)> CheckLatestUpdateInfoAsync(string owner, string repo, CancellationToken token = default)
@@ -1922,6 +2955,7 @@ namespace AionToolLite.Services
 
         public async Task<OperationResult> CheckAndInstallUpdateAsync(string owner, string repo, CancellationToken token = default)
         {
+            string? stageDir = null;
             string? stagedExe = null;
             try
             {
@@ -1944,9 +2978,25 @@ namespace AionToolLite.Services
                 if (latestVer <= currentVer)
                     return new OperationResult(false, $"You're up to date (v{currentVer}).", $"برنامه شما به‌روز است (نسخه {currentVer}).");
 
+                // Require at least one independent cryptographic trust anchor (pinned offline RSA key OR Authenticode signer on current exe)
+                bool hasPinnedRsa = HasPinnedReleasePublicKey();
+                string? currentExeThumbprint = !string.IsNullOrWhiteSpace(Environment.ProcessPath) && VerifyAuthenticodeSignature(Environment.ProcessPath)
+                    ? TryGetAuthenticodeThumbprint(Environment.ProcessPath)
+                    : null;
+
+                if (!hasPinnedRsa && string.IsNullOrEmpty(currentExeThumbprint))
+                {
+                    return new OperationResult(
+                        false,
+                        $"Update v{latestVer} is available, but silent admin install is disabled for unsigned builds. Download manually from GitHub Releases.",
+                        $"نسخه v{latestVer} موجود است، اما نصب خودکار برای بیلدهای بدون امضای رمزنگاری غیرفعال است. لطفاً دستی از گیت‌هاب دانلود کنید.");
+                }
+
                 string? exeName = null;
                 string? dlUrl = null;
+                string? checksumName = null;
                 string? checksumUrl = null;
+                string? sigUrl = null;
 
                 if (doc.RootElement.TryGetProperty("assets", out var assets))
                 {
@@ -1966,7 +3016,15 @@ namespace AionToolLite.Services
                                   name.Equals("sha256.txt", StringComparison.OrdinalIgnoreCase) ||
                                   name.EndsWith(".sha256", StringComparison.OrdinalIgnoreCase)))
                         {
+                            checksumName = name;
                             checksumUrl = url;
+                        }
+                        else if (sigUrl == null &&
+                                 (name.Equals("checksums.txt.sig", StringComparison.OrdinalIgnoreCase) ||
+                                  name.Equals("sha256sums.txt.sig", StringComparison.OrdinalIgnoreCase) ||
+                                  name.EndsWith(".sha256.sig", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            sigUrl = url;
                         }
                     }
                 }
@@ -1974,20 +3032,47 @@ namespace AionToolLite.Services
                 if (!IsTrustedGitHubHttpsUrl(dlUrl, out var dlUri) || dlUri == null || string.IsNullOrWhiteSpace(exeName))
                     return new OperationResult(false, "Update found, but no verified GitHub installer is attached.", "آپدیت جدید یافت شد اما فایل نصبی معتبر یافت نشد.");
 
-                string? secureDir = await PrepareAdminOnlyUpdateDirectoryAsync(token).ConfigureAwait(false);
-                if (string.IsNullOrEmpty(secureDir))
-                    return new OperationResult(false, "Could not prepare secure admin-only update folder.", "ایجاد پوشه امن آپدیت با دسترسی ادمین ناموفق بود.");
+                // Mandatory SHA256 checksum asset (fail-closed: refuse to install if missing!)
+                if (!IsTrustedGitHubHttpsUrl(checksumUrl, out var sumUri) || sumUri == null || string.IsNullOrWhiteSpace(checksumName))
+                    return new OperationResult(false, "Update aborted: release is missing a required SHA256 checksum file.", "آپدیت متوقف شد: فایل الزامی چک‌سام SHA256 در انتشار وجود ندارد.");
 
-                // Strictly hex-only filename inside Admin-locked ProgramData directory (zero untrusted chars, zero TOCTOU)
-                stagedExe = Path.Combine(secureDir, $"update_{Guid.NewGuid():N}.exe");
-                if (stagedExe.IndexOfAny(ForbiddenShellChars) >= 0)
+                // Download checksum file BEFORE downloading installer
+                var sumDl = await DownloadSmallTrustedGitHubAssetAsync(sumUri, MaxChecksumBytes, token).ConfigureAwait(false);
+                if (!sumDl.Ok)
+                    return new OperationResult(false, sumDl.ErrorEn, sumDl.ErrorFa);
+
+                // If an offline RSA-3072 public key is pinned, verify detached signature over checksums.txt BEFORE downloading installer
+                if (hasPinnedRsa)
+                {
+                    if (!IsTrustedGitHubHttpsUrl(sigUrl, out var sigUri) || sigUri == null)
+                        return new OperationResult(false, "Update aborted: release is missing a required cryptographic signature (.sig).", "آپدیت متوقف شد: فایل امضای دیجیتال (.sig) در انتشار وجود ندارد.");
+
+                    var sigDl = await DownloadSmallTrustedGitHubAssetAsync(sigUri, MaxSignatureBytes, token).ConfigureAwait(false);
+                    if (!sigDl.Ok)
+                        return new OperationResult(false, sigDl.ErrorEn, sigDl.ErrorFa);
+
+                    if (!VerifyDetachedRsaSignature(sumDl.Data, sigDl.Data))
+                        return new OperationResult(false, "Update aborted: cryptographic release signature verification failed!", "آپدیت متوقف شد: تایید امضای دیجیتال انتشار ناموفق بود!");
+                }
+
+                // Parse mandatory SHA256 entry for this exact installer filename (fail-closed if missing/unparseable!)
+                string sumText = Encoding.UTF8.GetString(sumDl.Data);
+                byte[]? expectedHashBytes = ParseExpectedSha256Bytes(sumText, exeName, checksumName);
+                if (expectedHashBytes == null || expectedHashBytes.Length != 32)
+                    return new OperationResult(false, "Update aborted: checksum file has no valid SHA256 entry for this installer.", "آپدیت متوقف شد: فایل چک‌سام فاقد هش SHA256 معتبر برای این فایل نصبی است.");
+
+                stageDir = PrepareAdminOnlyUpdateDirectory();
+                if (string.IsNullOrEmpty(stageDir))
+                    return new OperationResult(false, "Could not prepare verified admin-owned update folder.", "ایجاد یا تایید مالکیت ادمین پوشه امن آپدیت ناموفق بود.");
+
+                stagedExe = Path.Combine(stageDir, $"update_{Guid.NewGuid():N}.exe");
+                if (stagedExe.IndexOfAny(ForbiddenShellChars) >= 0 || stageDir.IndexOfAny(ForbiddenShellChars) >= 0)
                     return new OperationResult(false, "Blocked update: unsafe staging path.", "آپدیت متوقف شد: مسیر ذخیره‌سازی نامعتبر است.");
 
                 using (var dlResp = await SharedHttp.GetAsync(dlUri, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false))
                 {
                     dlResp.EnsureSuccessStatusCode();
 
-                    // Verify final post-redirect URI stayed on HTTPS + GitHub domain
                     var finalUri = dlResp.RequestMessage?.RequestUri;
                     if (finalUri == null || finalUri.Scheme != Uri.UriSchemeHttps || !IsTrustedGitHubHost(finalUri.Host))
                         return new OperationResult(false, "Update aborted: redirected outside trusted GitHub HTTPS.", "آپدیت متوقف شد: ریدایرکت خارج از سرور امن گیت‌هاب.");
@@ -2028,34 +3113,27 @@ namespace AionToolLite.Services
                     }
                 }
 
-                // Verify SHA256 if a checksum file is provided in the GitHub release
-                if (IsTrustedGitHubHttpsUrl(checksumUrl, out var sumUri) && sumUri != null)
+                // Mandatory constant-time SHA256 verification against verified checksums.txt
+                byte[] actualHashBytes;
+                await using (var verifyStream = new FileStream(stagedExe, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, true))
                 {
-                    using var sumResp = await SharedHttp.GetAsync(sumUri, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
-                    sumResp.EnsureSuccessStatusCode();
-                    var finalSumUri = sumResp.RequestMessage?.RequestUri;
-                    if (finalSumUri == null || finalSumUri.Scheme != Uri.UriSchemeHttps || !IsTrustedGitHubHost(finalSumUri.Host))
+                    actualHashBytes = await SHA256.HashDataAsync(verifyStream, token).ConfigureAwait(false);
+                }
+
+                if (!CryptographicOperations.FixedTimeEquals(actualHashBytes, expectedHashBytes))
+                {
+                    try { File.Delete(stagedExe); } catch { }
+                    return new OperationResult(false, "Update aborted: SHA256 checksum mismatch!", "آپدیت متوقف شد: عدم تطابق امضای امنیتی SHA256!");
+                }
+
+                // If the running app is Authenticode-signed, enforce matching Authenticode signature on the new installer too
+                if (!string.IsNullOrEmpty(currentExeThumbprint))
+                {
+                    string? newThumbprint = VerifyAuthenticodeSignature(stagedExe) ? TryGetAuthenticodeThumbprint(stagedExe) : null;
+                    if (!string.Equals(newThumbprint, currentExeThumbprint, StringComparison.OrdinalIgnoreCase))
                     {
                         try { File.Delete(stagedExe); } catch { }
-                        return new OperationResult(false, "Update aborted: untrusted checksum redirect.", "آپدیت متوقف شد: منبع فایل چک‌سام نامعتبر است.");
-                    }
-
-                    string sumText = await sumResp.Content.ReadAsStringAsync(token).ConfigureAwait(false);
-                    string? expectedHash = ParseExpectedSha256(sumText, exeName);
-                    if (!string.IsNullOrEmpty(expectedHash))
-                    {
-                        string actualHash;
-                        await using (var verifyStream = new FileStream(stagedExe, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, true))
-                        {
-                            byte[] actualBytes = await SHA256.HashDataAsync(verifyStream, token).ConfigureAwait(false);
-                            actualHash = Convert.ToHexString(actualBytes).ToLowerInvariant();
-                        }
-
-                        if (!string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
-                        {
-                            try { File.Delete(stagedExe); } catch { }
-                            return new OperationResult(false, "Update aborted: SHA256 checksum mismatch!", "آپدیت متوقف شد: عدم تطابق امضای امنیتی SHA256!");
-                        }
+                        return new OperationResult(false, "Update aborted: installer Authenticode publisher signature mismatch!", "آپدیت متوقف شد: عدم تطابق امضای دیجیتال ناشر (Authenticode)!");
                     }
                 }
 
@@ -2063,9 +3141,14 @@ namespace AionToolLite.Services
                 string pingPath = _runner.ResolveSystemExecutable("ping.exe");
                 string taskkillPath = _runner.ResolveSystemExecutable("taskkill.exe");
 
-                // Use ping.exe instead of timeout.exe (timeout fails immediately in non-console GUI apps)
-                // Wrap inner command in outer quotes so cmd.exe /c strips only the outer pair safely
-                string innerCmd = $"\"{pingPath}\" -n 3 127.0.0.1 > NUL & \"{taskkillPath}\" /F /IM AionToolLite.exe > NUL 2>&1 & \"{pingPath}\" -n 2 127.0.0.1 > NUL & \"{stagedExe}\" /VERYSILENT /SUPPRESSMSGBOXES /FORCECLOSEAPPLICATIONS /NORESTART & del /f /q \"{stagedExe}\" > NUL 2>&1";
+                // Re-verify staging directory ownership & ACL right before executing the verified installer
+                if (!IsDirectoryOwnedAndLockedByAdmins(stageDir, strictAdminOnly: true))
+                {
+                    try { Directory.Delete(stageDir, recursive: true); } catch { }
+                    return new OperationResult(false, "Update aborted: staging folder ownership/ACL verification failed.", "آپدیت متوقف شد: تایید امنیتی مالکیت پوشه آپدیت ناموفق بود.");
+                }
+
+                string innerCmd = $"\"{pingPath}\" -n 3 127.0.0.1 > NUL & \"{taskkillPath}\" /F /IM AionToolLite.exe > NUL 2>&1 & \"{pingPath}\" -n 2 127.0.0.1 > NUL & \"{stagedExe}\" /VERYSILENT /SUPPRESSMSGBOXES /FORCECLOSEAPPLICATIONS /NORESTART & rmdir /s /q \"{stageDir}\" > NUL 2>&1";
                 Process.Start(new ProcessStartInfo
                 {
                     FileName = cmdPath,
@@ -2078,7 +3161,11 @@ namespace AionToolLite.Services
             }
             catch (Exception ex)
             {
-                if (!string.IsNullOrEmpty(stagedExe))
+                if (!string.IsNullOrEmpty(stageDir))
+                {
+                    try { if (Directory.Exists(stageDir) && !IsReparsePoint(stageDir)) Directory.Delete(stageDir, recursive: true); } catch { }
+                }
+                else if (!string.IsNullOrEmpty(stagedExe))
                 {
                     try { if (File.Exists(stagedExe)) File.Delete(stagedExe); } catch { }
                 }

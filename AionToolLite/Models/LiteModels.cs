@@ -75,7 +75,8 @@ namespace AionToolLite.Models
         string BadgeHex,
         string? PrimaryIpv6 = null,
         string? SecondaryIpv6 = null,
-        string? DohTemplate = null)
+        string? DohTemplate = null,
+        bool SmartAutoEligible = false)
     {
         public bool IsSmartAuto => Category == DnsCategory.Auto;
         public bool IsCustom => Category == DnsCategory.Custom;
@@ -105,7 +106,9 @@ namespace AionToolLite.Models
         string SecondaryIp,
         string DisplayNameEn,
         string DisplayNameFa,
-        string? MatchedPresetId)
+        string? MatchedPresetId,
+        string PrimaryIpv6 = "",
+        string SecondaryIpv6 = "")
     {
         public static ActiveDnsStatus Automatic { get; } = new(false, string.Empty, string.Empty, string.Empty, string.Empty, null);
     }
@@ -115,7 +118,14 @@ namespace AionToolLite.Models
         bool WasDhcp,
         string PrimaryIp,
         string SecondaryIp,
-        string SavedAtUtc);
+        string SavedAtUtc,
+        bool WasDhcpIpv6 = true,
+        string PrimaryIpv6 = "",
+        string SecondaryIpv6 = "");
+
+    public sealed record GameModeStateRecord(
+        List<string> StoppedServices,
+        long BootUtcTicks);
 
     public sealed record StabilityCheckResult(
         bool Success,
@@ -127,14 +137,16 @@ namespace AionToolLite.Models
         long? RouterAvgMs,
         long? RouterJitterMs,
         string VerdictEn,
-        string VerdictFa);
+        string VerdictFa,
+        bool RouterBlockedIcmp = false);
 
     public sealed record LiteBlocklistItem(
         string Tag,
         string Name,
         string Category,
         string DownloadUrl,
-        bool IsBuiltInCustom = false)
+        bool IsBuiltInCustom = false,
+        bool IsLargeList = false)
     {
         public override string ToString() => $"{Name} — {Category}";
     }
@@ -210,6 +222,35 @@ namespace AionToolLite.Models
             return true;
         }
 
+        // Permits local loopback resolvers (e.g. 127.0.0.1 Pi-hole / AdGuard Home) for detection & lossless backup/restore
+        public static bool IsValidBackupDnsIpv4(string? input)
+        {
+            if (IsSafeDnsIpv4(input)) return true;
+            if (string.IsNullOrWhiteSpace(input)) return false;
+            string s = input.Trim();
+            if (!IPAddress.TryParse(s, out var ip) || ip.AddressFamily != AddressFamily.InterNetwork)
+                return false;
+            if (!string.Equals(ip.ToString(), s, StringComparison.Ordinal))
+                return false;
+            return ip.GetAddressBytes()[0] == 127;
+        }
+
+        public static bool IsSafeDnsIpv6(string? input)
+        {
+            if (string.IsNullOrWhiteSpace(input)) return false;
+            string s = input.Trim();
+            if (s.Contains('%') || s.Length < 2 || s.Length > 45) return false;
+            if (!IPAddress.TryParse(s, out var ip) || ip.AddressFamily != AddressFamily.InterNetworkV6)
+                return false;
+            if (ip.Equals(IPAddress.IPv6None) || ip.Equals(IPAddress.IPv6Any) || ip.IsIPv6Multicast)
+                return false;
+            // Ignore Windows synthetic dummy site-local IPv6 DNS addresses (fec0:0:0:ffff::1..3)
+            byte[] b = ip.GetAddressBytes();
+            if (b[0] == 0xFE && b[1] == 0xC0 && b[2] == 0 && b[3] == 0 && b[4] == 0 && b[5] == 0 && b[6] == 0xFF && b[7] == 0xFF)
+                return false;
+            return true;
+        }
+
         public static bool IsValidBlocklistHostname(string? host)
         {
             if (string.IsNullOrWhiteSpace(host)) return false;
@@ -224,8 +265,8 @@ namespace AionToolLite.Models
         public static IReadOnlyList<LiteDnsPreset> DnsPresets { get; } = new List<LiteDnsPreset>
         {
             new("smart_auto", "Smart Auto", "", "", DnsCategory.Auto,
-                "Picks the fastest server automatically",
-                "انتخاب هوشمند سریع‌ترین سرور",
+                "Picks the fastest unfiltered global resolver",
+                "انتخاب هوشمند سریع‌ترین سرور جهانی بدون فیلتر",
                 "#818CF8"),
 
             // ==================== IRAN / GAMING (8) ====================
@@ -275,47 +316,54 @@ namespace AionToolLite.Models
                 "Ultra-fast global edge DNS",
                 "سریع‌ترین سرور جهانی",
                 "#38BDF8", "2606:4700:4700::1111", "2606:4700:4700::1001",
-                "https://cloudflare-dns.com/dns-query"),
+                "https://cloudflare-dns.com/dns-query",
+                SmartAutoEligible: true),
 
             new("google", "Google DNS", "8.8.8.8", "8.8.4.4", DnsCategory.Global,
                 "Reliable worldwide DNS",
                 "پایدار و مطمئن جهانی",
                 "#38BDF8", "2001:4860:4860::8888", "2001:4860:4860::8844",
-                "https://dns.google/dns-query"),
+                "https://dns.google/dns-query",
+                SmartAutoEligible: true),
 
             new("opendns", "OpenDNS", "208.67.222.222", "208.67.220.220", DnsCategory.Global,
                 "Cisco enterprise recursive DNS",
                 "سرور قدرتمند سیسکو",
                 "#38BDF8", "2620:119:35::35", "2620:119:53::53",
-                "https://doh.opendns.com/dns-query"),
+                "https://doh.opendns.com/dns-query",
+                SmartAutoEligible: true),
 
             new("controld", "ControlD", "76.76.2.0", "76.76.10.0", DnsCategory.Global,
                 "Modern fast anycast DNS",
                 "سرور مدرن با سرعت بالا",
                 "#38BDF8", "2606:1a40::", "2606:1a40:1::",
-                "https://freedns.controld.com/p0"),
+                "https://freedns.controld.com/p0",
+                SmartAutoEligible: true),
 
-            new("mullvad", "Mullvad DNS", "194.242.2.2", "194.242.2.3", DnsCategory.Global,
-                "Privacy-first zero-log DNS",
-                "حریم خصوصی بالا بدون لاگ",
-                "#38BDF8",
-                DohTemplate: "https://dns.mullvad.net/dns-query"),
+            // Mullvad unfiltered uses 194.242.2.2 + 2a07:e340::2 only (no ad-blocking secondary)
+            new("mullvad", "Mullvad DNS", "194.242.2.2", "", DnsCategory.Global,
+                "Privacy-first zero-log unfiltered DNS",
+                "حریم خصوصی بالا بدون لاگ و فیلتر",
+                "#38BDF8", "2a07:e340::2", null,
+                "https://dns.mullvad.net/dns-query",
+                SmartAutoEligible: true),
 
             new("yandex", "Yandex DNS", "77.88.8.8", "77.88.8.1", DnsCategory.Global,
                 "Fast Eurasia regional DNS",
                 "پاسخ‌دهی سریع منطقه‌ای",
-                "#38BDF8"),
+                "#38BDF8", "2a02:6b8::feed:0ff", "2a02:6b8:0:1::feed:0ff"),
 
             new("level3", "Level3", "4.2.2.4", "4.2.2.2", DnsCategory.Global,
                 "Classic backbone resolver",
                 "دی‌ان‌اس کلاسیک و کم‌پینگ",
-                "#38BDF8"),
+                "#38BDF8",
+                SmartAutoEligible: true),
 
             new("alidns", "AliDNS", "223.5.5.5", "223.6.6.6", DnsCategory.Global,
                 "Alibaba Cloud global DNS",
                 "دی‌ان‌اس جهانی علی‌بابا",
-                "#38BDF8",
-                DohTemplate: "https://dns.alidns.com/dns-query"),
+                "#38BDF8", "2400:3200::1", "2400:3200:baba::1",
+                "https://dns.alidns.com/dns-query"),
 
             new("114dns", "114DNS", "114.114.114.114", "114.114.115.115", DnsCategory.Global,
                 "Reliable Asian & Pacific DNS",
@@ -350,14 +398,14 @@ namespace AionToolLite.Models
             new("cleanbrowsing", "CleanBrowsing", "185.228.168.9", "185.228.169.9", DnsCategory.Security,
                 "Blocks malicious & phishing domains",
                 "فیلتر امنیتی سایت‌های مخرب",
-                "#FACC15",
-                DohTemplate: "https://doh.cleanbrowsing.org/doh/security-filter/"),
+                "#FACC15", "2a0d:2a00:1::2", "2a0d:2a00:2::2",
+                "https://doh.cleanbrowsing.org/doh/security-filter/"),
 
             new("dns0eu", "dns0.eu", "193.110.81.0", "185.253.5.0", DnsCategory.Security,
                 "European privacy & threat shield",
                 "دی‌ان‌اس امن و حریم خصوصی اروپا",
-                "#FACC15",
-                DohTemplate: "https://dns0.eu/"),
+                "#FACC15", "2a0f:fc80::", "2a0f:fc81::",
+                "https://dns0.eu/"),
 
             new("comodo", "Comodo Secure", "8.26.56.26", "8.20.247.20", DnsCategory.Security,
                 "Cloud malware & web protection",
@@ -372,13 +420,13 @@ namespace AionToolLite.Models
 
         public static IReadOnlyList<LiteBlocklistItem> Blocklists { get; } = new List<LiteBlocklistItem>
         {
-            new("TeamSpeak-Blocked",       "TeamSpeak Fix (Custom)",         "Custom Rule",       "local://teamspeak", IsBuiltInCustom: true),
-            new("StevenBlack-Base",        "StevenBlack Ads & Malware",      "Ads + Malware",     "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"),
-            new("StevenBlack-Social",      "StevenBlack Ads + Social",       "Social + Trackers", "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/social/hosts"),
-            new("StevenBlack-Gambling",    "StevenBlack Gambling Filter",    "Content Filter",    "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts"),
-            new("StevenBlack-Porn",        "StevenBlack Family Shield",      "Adult Filter",      "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn/hosts"),
-            new("PeterLowe-AdServers",     "Peter Lowe Ad Servers",          "Lightweight Ads",   "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext"),
-            new("Pollock-SomeoneWhoCares", "Dan Pollock Zero-Route",         "Zero-Route Shield", "https://someonewhocares.org/hosts/zero/hosts")
+            new("TeamSpeak-Blocked",       "TeamSpeak Fix (Custom)",         "Custom Rule (9)",          "local://teamspeak", IsBuiltInCustom: true, IsLargeList: false),
+            new("PeterLowe-AdServers",     "Peter Lowe Ad Servers",          "Lightweight Ads (~3.5k)",  "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext", IsLargeList: false),
+            new("Pollock-SomeoneWhoCares", "Dan Pollock Zero-Route",         "Medium Shield (~16k)",     "https://someonewhocares.org/hosts/zero/hosts", IsLargeList: false),
+            new("StevenBlack-Base",        "StevenBlack Ads & Malware",      "Large (~80k+)",            "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", IsLargeList: true),
+            new("StevenBlack-Social",      "StevenBlack Ads + Social",       "Very Large (~100k+)",      "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/social/hosts", IsLargeList: true),
+            new("StevenBlack-Gambling",    "StevenBlack Gambling Filter",    "Large (~85k+)",            "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/gambling/hosts", IsLargeList: true),
+            new("StevenBlack-Porn",        "StevenBlack Family Shield",      "Very Large (~120k+)",      "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn/hosts", IsLargeList: true)
         };
 
         public static IReadOnlyList<LiteTheme> Themes { get; } = new List<LiteTheme>

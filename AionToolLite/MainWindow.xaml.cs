@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
 using System.Net.NetworkInformation;
@@ -32,6 +33,8 @@ namespace AionToolLite
         private const uint ModNoRepeat = 0x4000;
         private const uint VkD = 0x44;
         private const int WmHotkey = 0x0312;
+        private const int WmQueryEndSession = 0x0011;
+        private const int WmEndSession = 0x0016;
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
@@ -67,9 +70,11 @@ namespace AionToolLite
         private bool _loadedOnce;
         private bool _isReady;
         private bool _isBusy;
+        private bool _forceExit;
         private bool _isClosing;
         private bool _shownTrayTipOnce;
         private bool _isTelemetryTickRunning;
+        private int _hiddenTrayTickCount;
 
         private long _lastRx;
         private long _lastTx;
@@ -105,6 +110,7 @@ namespace AionToolLite
         public MainWindow()
         {
             InitializeComponent();
+            FitWindowToWorkArea();
 
             if (App.StartMinimized)
             {
@@ -194,8 +200,28 @@ namespace AionToolLite
             }
         }
 
+        private void FitWindowToWorkArea()
+        {
+            try
+            {
+                var work = SystemParameters.WorkArea;
+                if (work.Height > 0 && work.Height < 760)
+                {
+                    double targetH = Math.Max(500, Math.Min(744, work.Height - 16));
+                    Height = targetH;
+                    MaxHeight = Math.Max(targetH, work.Height - 8);
+                }
+                if (work.Width > 0 && work.Width < Width + 16)
+                {
+                    Width = Math.Max(360, work.Width - 16);
+                }
+            }
+            catch { }
+        }
+
         private void ExitApplicationCompletely()
         {
+            _forceExit = true;
             Close();
             Application.Current?.Shutdown();
         }
@@ -209,7 +235,7 @@ namespace AionToolLite
                 if (_orbState == OrbVisualState.Connected)
                 {
                     SetOrbState(OrbVisualState.Disconnecting);
-                    var res = await _service.DisconnectDnsToAutoAsync(_selectedAdapter);
+                    var res = await _service.RestoreOriginalDnsAsync(_selectedAdapter);
                     _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter, SavedCustomEntries);
                     SetOrbState(_activeDns.IsStaticConnected ? OrbVisualState.Connected : OrbVisualState.Idle);
                     UpdateSelectedDnsHomeCard();
@@ -374,7 +400,7 @@ namespace AionToolLite
 
                 _ = CheckUpdateBadgeSilentlyAsync();
 
-                if (_settings.AutoConnectOnStartup && !_activeDns.IsStaticConnected && !string.IsNullOrEmpty(_selectedAdapter))
+                if (_settings.AutoConnectOnStartup && !_activeDns.IsStaticConnected)
                 {
                     _ = AutoConnectOnStartupAsync();
                 }
@@ -387,6 +413,10 @@ namespace AionToolLite
             {
                 handled = true;
                 Dispatcher.InvokeAsync(ToggleConnectFromTrayAsync);
+            }
+            else if (msg == WmQueryEndSession || msg == WmEndSession)
+            {
+                _forceExit = true;
             }
             return IntPtr.Zero;
         }
@@ -478,6 +508,37 @@ namespace AionToolLite
         private async Task AutoConnectOnStartupAsync()
         {
             if (_isBusy || _isClosing) return;
+
+            LiteAdapterItem? readyAdapter = null;
+            for (int attempt = 0; attempt < 8 && !_isClosing; attempt++)
+            {
+                var adapters = await _service.ScanAdaptersAsync();
+                if (_isClosing) return;
+
+                string pref = _settings.PreferredAdapter ?? string.Empty;
+                readyAdapter = (!string.IsNullOrWhiteSpace(pref)
+                                    ? adapters.FirstOrDefault(a => a.Name.Equals(pref, StringComparison.OrdinalIgnoreCase) && a.Health == AdapterHealth.Connected && a.HasGateway)
+                                    : null)
+                               ?? adapters.FirstOrDefault(a => a.Health == AdapterHealth.Connected && a.HasGateway);
+
+                if (readyAdapter != null)
+                {
+                    ComboAdapters.ItemsSource = adapters;
+                    ComboAdapters.SelectedItem = readyAdapter;
+                    _selectedAdapter = readyAdapter.Name;
+                    break;
+                }
+
+                await Task.Delay(2500);
+            }
+
+            if (readyAdapter == null || _isClosing || _isBusy)
+                return;
+
+            _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter, SavedCustomEntries);
+            if (_activeDns.IsStaticConnected)
+                return;
+
             _isBusy = true;
             try
             {
@@ -494,6 +555,17 @@ namespace AionToolLite
             {
                 _isBusy = false;
             }
+        }
+
+        protected override void OnClosing(CancelEventArgs e)
+        {
+            if (!_forceExit && !App.IsShuttingDown && _settings.MinimizeToTray && _tray != null)
+            {
+                e.Cancel = true;
+                HideToTray();
+                return;
+            }
+            base.OnClosing(e);
         }
 
         protected override void OnClosed(EventArgs e)
@@ -720,7 +792,7 @@ namespace AionToolLite
             }
             else if (_pingMode == PingChannelMode.Intranet)
             {
-                LblHomePingTitle.Text = L("IRAN · ARVAN", "داخلی · آروان");
+                LblHomePingTitle.Text = L("EDGE · 1.1.1.1", "داخلی · آروان");
                 ApplyPingMetric(_lastTelemetry?.IntranetPingMs, isRouter: false, goodMax: 35, warnMax: 85);
             }
             else
@@ -789,17 +861,20 @@ namespace AionToolLite
                     SetOrbState(OrbVisualState.Disconnecting);
                     var sw = Stopwatch.StartNew();
 
-                    var res = await _service.DisconnectDnsToAutoAsync(_selectedAdapter);
+                    var origBackup = _service.GetOriginalDnsBackup(_selectedAdapter);
+                    var res = await _service.RestoreOriginalDnsAsync(_selectedAdapter);
 
                     int remaining = 380 - (int)sw.ElapsedMilliseconds;
                     if (remaining > 0) await Task.Delay(remaining);
 
                     _activeDns = await _service.DetectActiveStaticDnsAsync(_selectedAdapter, SavedCustomEntries);
-                    if (res.Success && !_activeDns.IsStaticConnected)
+                    bool restoredStaticOriginal = origBackup != null && (!origBackup.WasDhcp || !origBackup.WasDhcpIpv6);
+                    if (res.Success && (!_activeDns.IsStaticConnected || restoredStaticOriginal))
                     {
-                        SetOrbState(OrbVisualState.Idle);
+                        SetOrbState(_activeDns.IsStaticConnected ? OrbVisualState.Connected : OrbVisualState.Idle);
                         UpdateSelectedDnsHomeCard();
                         RebuildDnsCards();
+                        RefreshTrayState();
                         ShowToast(L(res.MessageEn, res.MessageFa));
                     }
                     else
@@ -1395,8 +1470,8 @@ namespace AionToolLite
         {
             if (_isBusy) return;
             if (MessageBox.Show(
-                    L($"Fully reset network adapter '{_selectedAdapter}'?\n\nYour internet will disconnect for ~5 seconds while the adapter restarts and renews its IP.",
-                      $"آیا کارت شبکه «{_selectedAdapter}» به صورت کامل ریست شود؟\n\nاینترنت شما حدود ۵ ثانیه قطع شده و پس از ریست کارت شبکه و تجدید IP مجدداً وصل می‌شود."),
+                    L($"Restart network adapter '{_selectedAdapter}'?\n\nThis will temporarily disconnect '{_selectedAdapter}' for ~5 seconds, flush DNS/ARP caches, and renew its DHCP lease (static IPs on other adapters are preserved).",
+                      $"آیا کارت شبکه «{_selectedAdapter}» ریستارت شود؟\n\nاین کارت شبکه حدود ۵ ثانیه قطع شده، کش DNS و ARP پاکسازی و IP داینامیک آن تجدید می‌شود (آی‌پی استاتیک سایر کارت‌ها دست‌نخورده می‌ماند)."),
                     "AionToolLite",
                     MessageBoxButton.YesNo,
                     MessageBoxImage.Question) != MessageBoxResult.Yes)
@@ -1454,17 +1529,25 @@ namespace AionToolLite
             }
 
             ToggleNativeDoh.IsEnabled = false;
-            _settings = _settings with { EnableNativeDoH = target };
-            _service.SaveSettings(_settings);
-
+            bool succeeded = false;
             await RunSafeAsync(async () =>
             {
                 var res = await _service.ToggleNativeDohOnActiveDnsAsync(_selectedAdapter, target);
+                succeeded = res.Success;
+                if (res.Success)
+                {
+                    _settings = _settings with { EnableNativeDoH = target };
+                    _service.SaveSettings(_settings);
+                }
                 ShowToast(L(res.MessageEn, res.MessageFa), isError: !res.Success);
             }, "NativeDoH");
 
             if (!_isClosing)
+            {
+                if (!succeeded)
+                    ToggleNativeDoh.IsChecked = !target;
                 ToggleNativeDoh.IsEnabled = true;
+            }
         }
 
         private async void BtnStabilityCheck_Click(object sender, RoutedEventArgs e)
@@ -1483,16 +1566,19 @@ namespace AionToolLite
                         ? $"{res.GlobalAvgMs}ms ±{res.GlobalJitterMs ?? 0}ms ({res.GlobalLossPct:0.#}% loss)"
                         : L("No reply (100% loss)", "بدون پاسخ (۱۰۰٪ پکت‌لاس)");
 
-                    string modemPart = res.RouterAvgMs.HasValue
-                        ? $"Modem {res.RouterAvgMs}ms ({res.RouterLossPct:0.#}%)"
-                        : string.Empty;
+                    string modemPart = res.RouterBlockedIcmp
+                        ? L("Modem: ICMP blocked", "مودم: پینگ بسته")
+                        : res.RouterAvgMs.HasValue
+                            ? $"Modem {res.RouterAvgMs}ms ({res.RouterLossPct:0.#}%)"
+                            : string.Empty;
 
                     string statsLine = string.IsNullOrEmpty(modemPart)
                         ? netPart
                         : $"{modemPart} · Net {netPart}";
 
+                    bool isProblem = res.GlobalLossPct >= 5.0 || (!res.RouterBlockedIcmp && res.RouterAvgMs.HasValue && (res.RouterLossPct ?? 0) >= 5.0);
                     TxtStabilityResult.Text = $"{statsLine}{Environment.NewLine}{L(res.VerdictEn, res.VerdictFa)}";
-                    ShowToast(L(res.VerdictEn, res.VerdictFa), isError: res.GlobalLossPct >= 5.0 || (res.RouterLossPct ?? 0) >= 5.0);
+                    ShowToast(L(res.VerdictEn, res.VerdictFa), isError: isProblem);
                 }
                 else
                 {
@@ -1526,6 +1612,18 @@ namespace AionToolLite
         private async void BtnHostsApplyList_Click(object sender, RoutedEventArgs e)
         {
             if (ComboHostsBlocklist.SelectedItem is not LiteBlocklistItem item) return;
+
+            if (item.IsLargeList)
+            {
+                if (MessageBox.Show(
+                        L($"'{item.Name}' adds tens of thousands of entries to the Windows hosts file, which can slightly slow down the Windows DNS Client service.\n\nFor lighter ad-blocking (~3,500 rules), you can choose 'Peter Lowe Ad Servers' instead.\n\nApply '{item.Name}' anyway?",
+                          $"لیست «{item.Name}» ده‌ها هزار خط به فایل hosts ویندوز اضافه می‌کند که ممکن است سرویس DNS Client ویندوز را کمی کندتر کند.\n\nبرای مسدودسازی سبک‌تر (~۳۵۰۰ قانون) می‌توانید لیست «Peter Lowe Ad Servers» را انتخاب کنید.\n\nآیا همچنان مایل به اعمال «{item.Name}» هستید؟"),
+                        "AionToolLite",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Information) != MessageBoxResult.Yes)
+                    return;
+            }
+
             BtnHostsApplyList.IsEnabled = false;
             BtnHostsRemoveList.IsEnabled = false;
             HostsProgress.Visibility = Visibility.Visible;
@@ -1615,8 +1713,8 @@ namespace AionToolLite
                 {
                     _lastPublicIp = ip;
                     TxtPublicIpLabel.Text = $"🌍  {L(en, fa)}";
-                    try { Clipboard.SetText(ip); } catch { }
-                    ShowToast(L($"Public IP copied: {ip}", $"آی‌پی عمومی کپی شد: {ip}"));
+                    BtnCopyPublicIp.Visibility = Visibility.Visible;
+                    ShowToast(L($"Public IP: {ip} (click 📋 to copy)", $"آی‌پی عمومی: {ip} (برای کپی 📋 بزنید)"));
                 }
                 else
                 {
@@ -1625,18 +1723,39 @@ namespace AionToolLite
                 }
             }, "PublicIp");
 
-            BtnPublicIpCheck.IsEnabled = true;
+            if (!_isClosing)
+                BtnPublicIpCheck.IsEnabled = true;
+        }
+
+        private void BtnCopyPublicIp_Click(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(_lastPublicIp)) return;
+            try
+            {
+                Clipboard.SetText(_lastPublicIp);
+                ShowToast(L($"Copied {_lastPublicIp} to clipboard.", $"آی‌پی {_lastPublicIp} در کلیپ‌بورد کپی شد."));
+            }
+            catch { }
         }
 
         private async void BtnCleanTemp_Click(object sender, RoutedEventArgs e)
         {
+            if (MessageBox.Show(
+                    L("Delete temporary files older than 24 hours from your Temp folder and C:\\Windows\\Temp?\n\nActive, locked, and recently modified files (and .NET runtime caches) are skipped.",
+                      "فایل‌های موقت قدیمی‌تر از ۲۴ ساعت در پوشه Temp کاربر و C:\\Windows\\Temp پاکسازی شوند؟\n\nفایل‌های در حال استفاده، فایل‌های جدید و کش .NET دست‌نخورده می‌مانند."),
+                    "AionToolLite",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question) != MessageBoxResult.Yes)
+                return;
+
             BtnCleanTemp.IsEnabled = false;
             await RunSafeAsync(async () =>
             {
                 var res = await _service.CleanOldTempFilesAsync();
                 ShowToast(L(res.MessageEn, res.MessageFa), isError: !res.Success);
             }, "CleanTemp");
-            BtnCleanTemp.IsEnabled = true;
+            if (!_isClosing)
+                BtnCleanTemp.IsEnabled = true;
         }
 
         // ==================== SETTINGS, STARTUP, TRAY & THEMES ====================
@@ -1805,7 +1924,7 @@ namespace AionToolLite
             LblQuickFixDesc.Text = L("Clears DNS cache & refreshes connection", "پاکسازی کش دی‌ان‌اس و رفع گیر کردن اینترنت");
             TxtQuickFixBadge.Text = L("Run", "اجرا");
             LblFullFixTitle.Text = L("Full Network Fix", "تعمیر کامل کارت شبکه");
-            LblFullFixDesc.Text = L("Full adapter reset, IP renew & TCP/IP repair", "ریست کامل کارت شبکه، تجدید IP و تعمیر TCP/IP");
+            LblFullFixDesc.Text = L("Restarts this adapter, flushes ARP/DNS & renews DHCP IP", "ریستارت همین کارت شبکه، پاکسازی ARP/DNS و تجدید IP");
             if (TxtFullFixBadge.Text != "...")
                 TxtFullFixBadge.Text = L("Reset", "ریست");
             LblSpeedCheckTitle.Text = L("Speed Check", "تست سرعت اینترنت");
@@ -1831,6 +1950,7 @@ namespace AionToolLite
             LblExtraToolsTitle.Text = L("Quick System Tools", "ابزارهای سریع سیستم");
             if (string.IsNullOrEmpty(_lastPublicIp))
                 TxtPublicIpLabel.Text = L("🌍  Check My Public IP", "🌍  بررسی آی‌پی اینترنت من");
+            BtnCopyPublicIp.ToolTip = L("Copy Public IP", "کپی آی‌پی عمومی");
             TxtCleanTempLabel.Text = L("🧹  Clean Old Temp Files (>24h)", "🧹  پاکسازی فایل‌های موقت قدیمی");
 
             LblSettingsTitle.Text = L("Settings", "تنظیمات");
@@ -1876,6 +1996,12 @@ namespace AionToolLite
 
             ComboAdapters.SelectedItem = match;
             _selectedAdapter = match.Name;
+
+            if (string.IsNullOrWhiteSpace(_settings.PreferredAdapter) && match.Health == AdapterHealth.Connected && match.HasGateway)
+            {
+                _settings = _settings with { PreferredAdapter = match.Name };
+                _service.SaveSettings(_settings);
+            }
         }
 
         private async void ComboAdapters_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -1932,11 +2058,13 @@ namespace AionToolLite
         {
             if (_isBusy) return;
             var origBackup = _service.GetOriginalDnsBackup(_selectedAdapter);
-            string dnsNoteEn = origBackup != null && !origBackup.WasDhcp
-                ? $"Restore your original DNS ({origBackup.PrimaryIp})"
+            string origTarget = origBackup != null && !origBackup.WasDhcp ? origBackup.PrimaryIp
+                : (origBackup != null && !origBackup.WasDhcpIpv6 ? origBackup.PrimaryIpv6 : string.Empty);
+            string dnsNoteEn = !string.IsNullOrEmpty(origTarget)
+                ? $"Restore your original DNS ({origTarget})"
                 : "Reset DNS to Automatic";
-            string dnsNoteFa = origBackup != null && !origBackup.WasDhcp
-                ? $"بازیابی دی‌ان‌اس قبلی شما ({origBackup.PrimaryIp})"
+            string dnsNoteFa = !string.IsNullOrEmpty(origTarget)
+                ? $"بازیابی دی‌ان‌اس قبلی شما ({origTarget})"
                 : "بازگرداندن دی‌ان‌اس به حالت خودکار";
 
             if (MessageBox.Show(
@@ -2005,13 +2133,28 @@ namespace AionToolLite
 
         private async Task RefreshTelemetryAsync()
         {
-            if (_isTelemetryTickRunning || _isClosing || !IsVisible || WindowState == WindowState.Minimized)
+            if (_isTelemetryTickRunning || _isClosing)
                 return;
 
+            if (!IsVisible || WindowState == WindowState.Minimized)
+            {
+                _hiddenTrayTickCount++;
+                if (_hiddenTrayTickCount >= 3)
+                {
+                    _hiddenTrayTickCount = 0;
+                    _isTelemetryTickRunning = true;
+                    try { await SyncActiveDnsFromSystemAsync(); }
+                    catch { }
+                    finally { _isTelemetryTickRunning = false; }
+                }
+                return;
+            }
+
+            _hiddenTrayTickCount = 0;
             _isTelemetryTickRunning = true;
             try
             {
-                var snap = await _service.CaptureTelemetryAsync(_selectedAdapter, SavedCustomEntries);
+                var snap = await _service.CaptureTelemetryAsync(_selectedAdapter, SavedCustomEntries, useIranRegionalTarget: IsFa);
                 if (_isClosing) return;
 
                 _lastTelemetry = snap;

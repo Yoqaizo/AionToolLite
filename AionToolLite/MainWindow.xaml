@@ -126,7 +126,8 @@
                             </Grid.RenderTransform>
 
                             <!-- ==================== VIEW 1: HOME (HERO ORB) ==================== -->
-                            <Grid x:Name="ViewHome" Visibility="Visible">
+                            <ScrollViewer x:Name="ViewHome" Visibility="Visible" VerticalScrollBarVisibility="Auto" Padding="0,0,2,0">
+                            <Grid MinHeight="556">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
@@ -267,7 +268,7 @@
                                             Style="{StaticResource CardButtonStyle}"
                                             Margin="0,0,5,0"
                                             Padding="12,10"
-                                            ToolTip="Click to switch: Global → Local (Iran) → Modem">
+                                            ToolTip="Click to switch: Global → Regional → Modem">
                                         <StackPanel x:Name="PingCardContent">
                                             <Grid>
                                                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -298,6 +299,7 @@
                                     </Border>
                                 </UniformGrid>
                             </Grid>
+                            </ScrollViewer>
 
                             <!-- ==================== VIEW 2: DNS PICKER ==================== -->
                             <Grid x:Name="ViewDns" Visibility="Collapsed">
@@ -482,7 +484,7 @@
                                                 </Border>
                                                 <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,6,0">
                                                     <TextBlock x:Name="LblFullFixTitle" Text="Full Network Fix" FontSize="13.5" FontWeight="Bold" Foreground="{DynamicResource PrimaryTextBrush}"/>
-                                                    <TextBlock x:Name="LblFullFixDesc" Text="Full adapter reset, IP renew &amp; TCP/IP repair" FontSize="10.5" Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap"/>
+                                                    <TextBlock x:Name="LblFullFixDesc" Text="Restarts this adapter, flushes ARP/DNS &amp; renews DHCP IP" FontSize="10.5" Foreground="{DynamicResource MutedTextBrush}" TextWrapping="Wrap"/>
                                                 </StackPanel>
                                                 <TextBlock Grid.Column="2" x:Name="TxtFullFixBadge" Text="Reset" FontSize="11.5" FontWeight="Bold" Foreground="#FB923C" VerticalAlignment="Center"/>
                                             </Grid>
@@ -586,9 +588,16 @@
                                         <StackPanel>
                                             <TextBlock x:Name="LblExtraToolsTitle" Text="Quick System Tools" FontSize="13.5" FontWeight="Bold" Foreground="{DynamicResource PrimaryTextBrush}" Margin="0,0,0,10"/>
 
-                                            <Button x:Name="BtnPublicIpCheck" Click="BtnPublicIpCheck_Click" Style="{StaticResource PillSoftBtnStyle}" Height="38" HorizontalContentAlignment="Left" Padding="12,0" Margin="0,0,0,8">
-                                                <TextBlock x:Name="TxtPublicIpLabel" Text="🌍  Check My Public IP" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-                                            </Button>
+                                            <Grid Margin="0,0,0,8">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <Button Grid.Column="0" x:Name="BtnPublicIpCheck" Click="BtnPublicIpCheck_Click" Style="{StaticResource PillSoftBtnStyle}" Height="38" HorizontalContentAlignment="Left" Padding="12,0">
+                                                    <TextBlock x:Name="TxtPublicIpLabel" Text="🌍  Check My Public IP" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                                </Button>
+                                                <Button Grid.Column="1" x:Name="BtnCopyPublicIp" Content="📋" Click="BtnCopyPublicIp_Click" Style="{StaticResource PillSoftBtnStyle}" Width="38" Height="38" Padding="0" Margin="6,0,0,0" Visibility="Collapsed" ToolTip="Copy Public IP"/>
+                                            </Grid>
 
                                             <Button x:Name="BtnCleanTemp" Click="BtnCleanTemp_Click" Style="{StaticResource PillSoftBtnStyle}" Height="38" HorizontalContentAlignment="Left" Padding="12,0">
                                                 <TextBlock x:Name="TxtCleanTempLabel" Text="🧹  Clean Old Temp Files (&gt;24h)" FontSize="12" FontWeight="SemiBold"/>

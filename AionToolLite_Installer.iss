@@ -43,14 +43,18 @@ Name: "{group}\AionToolLite"; Filename: "{app}\AionToolLite.exe"; WorkingDir: "{
 Name: "{commondesktop}\AionToolLite"; Filename: "{app}\AionToolLite.exe"; WorkingDir: "{app}"; IconFilename: "{app}\AionToolp.ico"
 
 [UninstallRun]
+; Restore original DNS, hosts, and Game Mode services BEFORE [UninstallDelete] removes backups
+Filename: "{app}\AionToolLite.exe"; Parameters: "--uninstall-cleanup"; Flags: runhidden waituntilterminated; RunOnceId: "CleanupAionToolLiteChanges"
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN AionToolLite_AutoStart /F"; Flags: runhidden; RunOnceId: "RemoveAionToolLiteAutoStart"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{userappdata}\AionToolLite"
 Type: filesandordirs; Name: "{commonappdata}\AionToolLite"
+Type: filesandordirs; Name: "{app}\Updates"
+Type: filesandordirs; Name: "{app}\State"
 
 [Run]
-; runascurrentuser + shellexec prevents CreateProcess error 740 on elevated exe and works cleanly in silent auto-updates
+; runascurrentuser + shellexec prevents CreateProcess error 740 on elevated exe and works smoothly in silent auto-updates
 Filename: "{app}\AionToolLite.exe"; WorkingDir: "{app}"; Description: "Launch AionToolLite"; Flags: nowait postinstall runascurrentuser shellexec
 
 [Code]
@@ -61,4 +65,13 @@ begin
   { Ensure any running or Tray-hidden AionToolLite instance is closed before replacing files and launching the new version }
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM AionToolLite.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := '';
+end;
+
+function InitializeUninstall(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  { Close any running AionToolLite instance before uninstall cleanup runs }
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM AionToolLite.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := True;
 end;
