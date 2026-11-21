@@ -97,7 +97,7 @@ namespace AionToolLite.Services
             };
             var c = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(45) };
             var v = Assembly.GetExecutingAssembly().GetName().Version;
-            string uaVer = v != null ? $"{v.Major}.{v.Minor}.{Math.Max(0, v.Build)}" : "1.2.3";
+            string uaVer = v != null ? $"{v.Major}.{v.Minor}.{Math.Max(0, v.Build)}" : "1.2.4";
             c.DefaultRequestHeaders.UserAgent.ParseAdd($"AionToolLite/{uaVer}");
             return c;
         }
@@ -1506,6 +1506,8 @@ namespace AionToolLite.Services
                         {
                             var di = new DirectoryInfo(sub);
                             if ((di.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+                            // Preserve .NET single-file native extraction cache folder
+                            if (di.Name.Equals(".net", StringComparison.OrdinalIgnoreCase)) continue;
                             if (di.LastWriteTimeUtc >= cutoff) continue;
                             Directory.Delete(sub, true);
                             deleted++;
@@ -1645,7 +1647,7 @@ namespace AionToolLite.Services
             string? stagedExe = null;
             try
             {
-                var rawVer = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 2, 3);
+                var rawVer = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 2, 4);
                 var currentVer = new Version(Math.Max(0, rawVer.Major), Math.Max(0, rawVer.Minor), Math.Max(0, rawVer.Build));
 
                 using var req = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{owner}/{repo}/releases/latest");

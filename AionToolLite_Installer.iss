@@ -1,6 +1,6 @@
 ; Inno Setup Script for AionToolLite (Compatible with Inno Setup 6 and 7)
 #ifndef AppVer
-  #define AppVer "1.2.3"
+  #define AppVer "1.2.4"
 #endif
 
 [Setup]
@@ -34,12 +34,13 @@ RestartApplications=no
 
 [Files]
 Source: "AionToolLite\bin\Release\net8.0-windows\win-x64\publish\AionToolLite.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "AionToolLite\bin\Release\net8.0-windows\win-x64\publish\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "AionToolLite\AionToolp.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\AionToolLite"; Filename: "{app}\AionToolLite.exe"; IconFilename: "{app}\AionToolp.ico"
-Name: "{commondesktop}\AionToolLite"; Filename: "{app}\AionToolLite.exe"; IconFilename: "{app}\AionToolp.ico"
+Name: "{group}\AionToolLite"; Filename: "{app}\AionToolLite.exe"; WorkingDir: "{app}"; IconFilename: "{app}\AionToolp.ico"
+Name: "{commondesktop}\AionToolLite"; Filename: "{app}\AionToolLite.exe"; WorkingDir: "{app}"; IconFilename: "{app}\AionToolp.ico"
 
 [UninstallRun]
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN AionToolLite_AutoStart /F"; Flags: runhidden; RunOnceId: "RemoveAionToolLiteAutoStart"
@@ -49,5 +50,15 @@ Type: filesandordirs; Name: "{userappdata}\AionToolLite"
 Type: filesandordirs; Name: "{commonappdata}\AionToolLite"
 
 [Run]
-; runascurrentuser + shellexec prevents CreateProcess error 740 on elevated exe and works smoothly in silent auto-updates
-Filename: "{app}\AionToolLite.exe"; Description: "Launch AionToolLite"; Flags: nowait postinstall runascurrentuser shellexec
+; runascurrentuser + shellexec prevents CreateProcess error 740 on elevated exe and works cleanly in silent auto-updates
+Filename: "{app}\AionToolLite.exe"; WorkingDir: "{app}"; Description: "Launch AionToolLite"; Flags: nowait postinstall runascurrentuser shellexec
+
+[Code]
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  { Ensure any running or Tray-hidden AionToolLite instance is closed before replacing files and launching the new version }
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM AionToolLite.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := '';
+end;

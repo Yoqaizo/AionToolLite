@@ -9,13 +9,14 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <NoWarn>$(NoWarn);WFAC010</NoWarn>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <ApplicationIcon>AionToolp.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>AionToolLite</AssemblyName>
     <RootNamespace>AionToolLite</RootNamespace>
-    <Version>1.2.3</Version>
-    <AssemblyVersion>1.2.3.0</AssemblyVersion>
-    <FileVersion>1.2.3.0</FileVersion>
+    <Version>1.2.4</Version>
+    <AssemblyVersion>1.2.4.0</AssemblyVersion>
+    <FileVersion>1.2.4.0</FileVersion>
     <Authors>Yoqaizo</Authors>
     <Product>AionToolLite</Product>
     <Copyright>Copyright (c) 2026 Yoqaizo — Licensed under GNU GPL v3.0</Copyright>

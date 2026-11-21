@@ -61,6 +61,15 @@ namespace AionToolLite.Services
                 }
             }
             catch { }
+
+            try
+            {
+                string? exe = Environment.ProcessPath;
+                if (!string.IsNullOrWhiteSpace(exe) && System.IO.File.Exists(exe))
+                    return Icon.ExtractAssociatedIcon(exe);
+            }
+            catch { }
+
             return null;
         }
 

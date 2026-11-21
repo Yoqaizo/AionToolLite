@@ -46,6 +46,7 @@ namespace AionToolLite
         private CancellationTokenSource? _toastCts;
         private CancellationTokenSource? _netChangeDebounceCts;
 
+        private bool _loadedOnce;
         private bool _isReady;
         private bool _isBusy;
         private bool _isClosing;
@@ -143,6 +144,9 @@ namespace AionToolLite
             ShowInTaskbar = true;
             if (!IsVisible) Show();
             if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+            BeginAnimation(OpacityProperty, null);
+            LaunchScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+            LaunchScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
             Opacity = 1;
             LaunchScale.ScaleX = 1;
             LaunchScale.ScaleY = 1;
@@ -273,6 +277,9 @@ namespace AionToolLite
 
         private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
+            if (_loadedOnce) return;
+            _loadedOnce = true;
+
             await RunSafeAsync(async () =>
             {
                 if (!App.StartMinimized)
@@ -292,7 +299,7 @@ namespace AionToolLite
                 ComboHostsBlocklist.SelectedIndex = 0;
 
                 var asmVer = Assembly.GetExecutingAssembly().GetName().Version;
-                string verLabel = asmVer != null ? $"{asmVer.Major}.{asmVer.Minor}.{Math.Max(0, asmVer.Build)}" : "1.2.3";
+                string verLabel = asmVer != null ? $"{asmVer.Major}.{asmVer.Minor}.{Math.Max(0, asmVer.Build)}" : "1.2.4";
                 TxtAppFooterVersion.Text = $"AionToolLite v{verLabel}  ·  Created by Yoqaizo";
 
                 LiteThemeManager.Apply(_currentTheme);
@@ -1062,6 +1069,8 @@ namespace AionToolLite
                 await RefreshTelemetryAsync();
             }, "CustomDns");
 
+            if (!_isClosing && _orbState == OrbVisualState.Connecting)
+                SetOrbState(_activeDns.IsStaticConnected ? OrbVisualState.Connected : OrbVisualState.Idle);
             _isBusy = false;
         }
 

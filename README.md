@@ -5,7 +5,7 @@
 
   <p>
     <a href="https://github.com/Yoqaizo/AionToolLite/releases/latest">
-      <img src="https://img.shields.io/badge/Version-v1.2.3-6366F1?style=for-the-badge" alt="Version v1.2.2" />
+      <img src="https://img.shields.io/badge/Version-v1.2.4-6366F1?style=for-the-badge" alt="Version v1.2.2" />
     </a>
     <img src="https://img.shields.io/badge/.NET-8.0%20WPF-512BD4?style=for-the-badge&logo=dotnet&logoColor=white" alt=".NET 8.0 WPF" />
     <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 10/11 x64" />
@@ -66,7 +66,7 @@ Because network configuration requires `Administrator` privileges, AionToolLite 
 ## Installation
 
 1. Go to the [**Latest Release**](https://github.com/Yoqaizo/AionToolLite/releases/latest) page.
-2. Download **`AionToolLite_Setup_v1.2.3.exe`**.
+2. Download **`AionToolLite_Setup_v1.2.4.exe`**.
 3. Run the installer and launch **AionToolLite**.
 4. Future updates can be installed silently in one click from **Settings → Check for Updates**.
 

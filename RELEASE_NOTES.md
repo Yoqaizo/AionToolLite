@@ -1,18 +1,16 @@
-## What's New in AionToolLite v1.2.3 (Hotfix)
+## What's New in AionToolLite v1.2.4 (Hotfix)
 
-This hotfix resolves the installer post-install launch error (`CreateProcess failed; code 740`) and improves silent auto-update and upgrade reliability.
+This critical hotfix resolves the issue where the installed `AionToolLite.exe` exited silently without opening a window after installation.
 
 ### Fixes
-* **Fixed Installer Launch Error (`code 740`):** Updated Inno Setup `[Run]` launch flags to `nowait postinstall runascurrentuser shellexec` so `AionToolLite.exe` launches smoothly with administrator privileges right after installation and after silent updates without triggering `CreateProcess failed; code 740`.
-* **Improved Upgrade & Shutdown Closing:** Only the in-app `✕` button minimizes to the System Tray; external close signals (such as Inno Setup Restart Manager during upgrades or Windows shutdown) now exit the app cleanly without leaving file locks.
-* **Hardened Silent Auto-Updater Wait Logic:** Replaced `timeout.exe` (which fails in non-console GUI contexts) with System32 `ping.exe` + `taskkill.exe` and safe outer quoting so silent in-app updates cleanly close the old instance, install the new version, and relaunch automatically.
-* **Smarter Release Script (`Publish-GitHub-Release.bat`):** Automatically syncs with existing `origin/main` history even when run from a freshly extracted folder.
+* **Fixed Silent Crash After Installation (Embedded Native WPF Libraries):** Enabled `IncludeNativeLibrariesForSelfExtract=true` in `.csproj`, `Publish-Standalone-Exe.bat`, and `Release-Manager.ps1` (plus wildcard `*.dll` fallback in `AionToolLite_Installer.iss`) so all required .NET 8 WPF native runtime libraries (`wpfgfx_cor3.dll`, `PresentationNative_cor3.dll`, `D3DCompiler_47_cor3.dll`, `PenImc_cor3.dll`, `vcruntime140_cor3.dll`) are bundled directly inside `AionToolLite.exe`.
+* **Protected `.NET` Extraction Cache:** Updated the built-in Temp Cleaner to preserve `%TEMP%\.net` so single-file native extraction caches are never deleted.
+* **Native Fatal Startup Error Dialog:** Added a Win32 `MessageBoxW` fallback in `App.xaml.cs` so any fatal pre-UI error displays clearly instead of closing silently.
+* **Clean Tray Restore Animation Reset:** Cleared lingering opacity/scale animations in `RestoreFromTray()` and guarded `MainWindow_Loaded` against duplicate execution.
 
 ### Installation & Verification
-1. Download **`AionToolLite_Setup_v1.2.3.exe`** below and run it.
+1. Download **`AionToolLite_Setup_v1.2.4.exe`** below and run it.
 2. *(Optional)* Verify integrity against **`checksums.txt`** using PowerShell:
    ```powershell
-   Get-FileHash .\AionToolLite_Setup_v1.2.3.exe -Algorithm SHA256
+   Get-FileHash .\AionToolLite_Setup_v1.2.4.exe -Algorithm SHA256
    ```
-
-> **Tip:** Users on `v1.2.2` can also update directly from **Settings → Check for Updates**.

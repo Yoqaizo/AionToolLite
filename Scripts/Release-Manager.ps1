@@ -102,11 +102,11 @@ Write-Host "  Repository      : https://github.com/$RepoOwner/$RepoName" -Foregr
 Write-Host "  Current Version : v$CurrentVer" -ForegroundColor Green
 Write-Host ""
 
-$InputVer = Read-Host "Press ENTER to publish v$CurrentVer, or type a new version (e.g. 1.2.3)"
+$InputVer = Read-Host "Press ENTER to publish v$CurrentVer, or type a new version (e.g. 1.3.0)"
 $TargetVer = if ([string]::IsNullOrWhiteSpace($InputVer)) { $CurrentVer } else { $InputVer.Trim().TrimStart('v', 'V') }
 
 if ($TargetVer -notmatch '^\d+\.\d+\.\d+$') {
-    Write-Err "Invalid version format '$TargetVer'. Expected MAJOR.MINOR.PATCH (e.g. 1.2.2)."
+    Write-Err "Invalid version format '$TargetVer'. Expected MAJOR.MINOR.PATCH (e.g. 1.2.4)."
     exit 1
 }
 
@@ -206,14 +206,28 @@ $null = & gh auth setup-git 2>&1
 
 # ==================== 4. BUILD STANDALONE EXE AND INSTALLER ====================
 Write-Step "Publishing Standalone Single-File AionToolLite.exe (v$TargetVer)"
+$PublishDir = Join-Path $RootDir "AionToolLite\bin\Release\net8.0-windows\win-x64\publish"
+if (Test-Path -LiteralPath $PublishDir) {
+    Remove-Item -LiteralPath $PublishDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 & dotnet publish "AionToolLite\AionToolLite.csproj" -c Release -r win-x64 --self-contained true `
-    /p:PublishSingleFile=true /p:PublishReadyToRun=true /p:EnableCompressionInSingleFile=true `
+    /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true /p:PublishReadyToRun=true /p:EnableCompressionInSingleFile=true `
     /p:DebugType=None /p:DebugSymbols=false
 if ($LASTEXITCODE -ne 0) {
     Write-Err "dotnet publish failed."
     exit 1
 }
-Write-Ok "Standalone executable built successfully."
+$PublishedExe = Join-Path $PublishDir "AionToolLite.exe"
+if (-not (Test-Path -LiteralPath $PublishedExe)) {
+    Write-Err "Published executable not found at: $PublishedExe"
+    exit 1
+}
+$ExeSizeMb = [Math]::Round((Get-Item -LiteralPath $PublishedExe).Length / 1MB, 1)
+if ($ExeSizeMb -lt 20) {
+    Write-Err "Published AionToolLite.exe is unexpectedly small ($ExeSizeMb MB). Self-contained single-file publish may be incomplete."
+    exit 1
+}
+Write-Ok "Standalone executable verified ($ExeSizeMb MB, native WPF libraries embedded)."
 
 Write-Step "Compiling Inno Setup Installer (AionToolLite_Setup_v$TargetVer.exe)"
 & $IsccExe "/DAppVer=$TargetVer" (Join-Path $RootDir "AionToolLite_Installer.iss")

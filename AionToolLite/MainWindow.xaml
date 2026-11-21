@@ -627,7 +627,7 @@
                                         </StackPanel>
                                     </Border>
 
-                                    <TextBlock x:Name="TxtAppFooterVersion" Text="AionToolLite v1.2.3  ·  Created by Yoqaizo"
+                                    <TextBlock x:Name="TxtAppFooterVersion" Text="AionToolLite v1.2.4  ·  Created by Yoqaizo"
                                                FontSize="10.5"
                                                HorizontalAlignment="Center"
                                                Foreground="{DynamicResource MutedTextBrush}"

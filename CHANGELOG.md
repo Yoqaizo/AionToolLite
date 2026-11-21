@@ -2,6 +2,13 @@
 
 All notable changes to **AionToolLite** are documented in this file.
 
+## [1.2.4] - 2026-11-21
+### Fixed
+- **Critical:** Fixed silent exit after installation by embedding all .NET 8 WPF native DLLs (`IncludeNativeLibrariesForSelfExtract=true`), cleaning `win-x64\publish` before publish, and adding `*.dll` fallback packaging to `AionToolLite_Installer.iss`.
+- Protected `%TEMP%\.net` from deletion inside `CleanOldTempFilesAsync()`.
+- Added native Win32 `MessageBoxW` fallback for fatal `AppDomain.UnhandledException` errors so startup failures never die silently.
+- Cleared active animation clocks in `RestoreFromTray()` and added `_loadedOnce` guard to `MainWindow_Loaded`.
+
 ## [1.2.3] - 2026-11-21
 ### Fixed
 - Fixed Inno Setup `CreateProcess failed; code 740` on finish/launch by adding `runascurrentuser shellexec` to `[Run]` in `AionToolLite_Installer.iss`.

@@ -31,6 +31,9 @@ namespace AionToolLite
         [DllImport("user32.dll")]
         private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);
+
         protected override void OnStartup(StartupEventArgs e)
         {
             StartMinimized = e.Args.Any(a =>
@@ -46,6 +49,10 @@ namespace AionToolLite
             {
                 _singleInstanceMutex = new Mutex(true, MutexName, out bool createdNew);
                 _ownsMutex = createdNew;
+            }
+            catch (AbandonedMutexException)
+            {
+                _ownsMutex = true;
             }
             catch (UnauthorizedAccessException)
             {
@@ -165,7 +172,24 @@ namespace AionToolLite
         private void OnCurrentDomainUnhandledException(object sender, UnhandledExceptionEventArgs e)
         {
             if (e.ExceptionObject is Exception ex)
+            {
                 WriteCrashLog("Domain", ex);
+                if (e.IsTerminating)
+                {
+                    try
+                    {
+                        string innerMsg = ex.InnerException != null
+                            ? $"\nInner: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}"
+                            : string.Empty;
+                        MessageBoxW(
+                            IntPtr.Zero,
+                            $"AionToolLite encountered a startup/runtime error:\n\n{ex.GetType().Name}: {ex.Message}{innerMsg}\n\nDetails saved to %APPDATA%\\AionToolLite\\crash.log",
+                            "AionToolLite — Fatal Error",
+                            0x00000010); // MB_ICONERROR
+                    }
+                    catch { }
+                }
+            }
         }
 
         public static void WriteCrashLog(string source, Exception ex)
@@ -187,7 +211,10 @@ namespace AionToolLite
                         File.WriteAllLines(path, lines[skip..], new UTF8Encoding(false));
                     }
 
-                    string entry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{source}] {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}{Environment.NewLine}{new string('-', 60)}{Environment.NewLine}";
+                    string innerDetails = ex.InnerException != null
+                        ? $"{Environment.NewLine}  Inner: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}{Environment.NewLine}{ex.InnerException.StackTrace}"
+                        : string.Empty;
+                    string entry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] [{source}] {ex.GetType().Name}: {ex.Message}{innerDetails}{Environment.NewLine}{ex.StackTrace}{Environment.NewLine}{new string('-', 60)}{Environment.NewLine}";
                     File.AppendAllText(path, entry, new UTF8Encoding(false));
                 }
                 catch { }
