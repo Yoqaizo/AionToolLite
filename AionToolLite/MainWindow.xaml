@@ -38,6 +38,29 @@
         <Storyboard x:Key="SpinnerStoryboard" RepeatBehavior="Forever">
             <DoubleAnimation Storyboard.TargetName="SpinnerRing" Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)" From="0" To="360" Duration="0:0:1.05"/>
         </Storyboard>
+
+        <!-- Updater Icon Smooth Spin Animation -->
+        <Storyboard x:Key="UpdateSpinStoryboard" RepeatBehavior="Forever">
+            <DoubleAnimation Storyboard.TargetName="UpdateStatusIcon" Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)" From="0" To="360" Duration="0:0:1.1"/>
+        </Storyboard>
+
+        <!-- Updater Progress Bar Shimmer Sweep Animation -->
+        <Storyboard x:Key="UpdateShimmerStoryboard" RepeatBehavior="Forever">
+            <DoubleAnimation Storyboard.TargetName="UpdateProgressShimmer" Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.X)" From="-120" To="360" Duration="0:0:1.35">
+                <DoubleAnimation.EasingFunction><SineEase EasingMode="EaseInOut"/></DoubleAnimation.EasingFunction>
+            </DoubleAnimation>
+        </Storyboard>
+
+        <!-- Settings Update Badge Gentle Pulse Animation -->
+        <Storyboard x:Key="UpdateBadgePulseStoryboard" RepeatBehavior="Forever" AutoReverse="True">
+            <DoubleAnimation Storyboard.TargetName="SettingsUpdateBadge" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" From="1.0" To="1.35" Duration="0:0:0.9">
+                <DoubleAnimation.EasingFunction><SineEase EasingMode="EaseInOut"/></DoubleAnimation.EasingFunction>
+            </DoubleAnimation>
+            <DoubleAnimation Storyboard.TargetName="SettingsUpdateBadge" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" From="1.0" To="1.35" Duration="0:0:0.9">
+                <DoubleAnimation.EasingFunction><SineEase EasingMode="EaseInOut"/></DoubleAnimation.EasingFunction>
+            </DoubleAnimation>
+            <DoubleAnimation Storyboard.TargetName="SettingsUpdateBadge" Storyboard.TargetProperty="Opacity" From="1.0" To="0.55" Duration="0:0:0.9"/>
+        </Storyboard>
     </Window.Resources>
 
     <!-- Outer Shadow Padding -->
@@ -268,7 +291,7 @@
                                             Style="{StaticResource CardButtonStyle}"
                                             Margin="0,0,5,0"
                                             Padding="12,10"
-                                            ToolTip="Click to switch: Global → Regional → Modem">
+                                            ToolTip="Click to switch: Global → Iran (Local) → Modem">
                                         <StackPanel x:Name="PingCardContent">
                                             <Grid>
                                                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -696,11 +719,138 @@
                                     <Border Style="{StaticResource GlassCardStyle}" Margin="0,0,0,10">
                                         <StackPanel>
                                             <Button x:Name="BtnCheckUpdates" Content="🔄 Check for Updates" Click="BtnCheckUpdates_Click" Style="{StaticResource PillPrimaryBtnStyle}" Height="38" Margin="0,0,0,8"/>
+
+                                            <!-- Animated GitHub Update & Download Progress Panel -->
+                                            <Border x:Name="UpdateProgressPanel"
+                                                    Background="{DynamicResource SurfaceSoftBrush}"
+                                                    BorderBrush="{DynamicResource BorderBrushSoft}"
+                                                    BorderThickness="1"
+                                                    CornerRadius="14"
+                                                    Padding="12,10"
+                                                    Margin="0,0,0,9"
+                                                    Visibility="Collapsed"
+                                                    Opacity="0">
+                                                <Border.RenderTransform>
+                                                    <TranslateTransform x:Name="UpdatePanelSlide" Y="-8"/>
+                                                </Border.RenderTransform>
+                                                <StackPanel>
+                                                    <Grid Margin="0,0,0,7">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+
+                                                        <Path x:Name="UpdateStatusIcon"
+                                                              Grid.Column="0"
+                                                              Width="14" Height="14"
+                                                              Stretch="Uniform"
+                                                              VerticalAlignment="Center"
+                                                              Margin="0,0,8,0"
+                                                              Stroke="{DynamicResource AccentBrush}"
+                                                              StrokeThickness="2.1"
+                                                              StrokeStartLineCap="Round"
+                                                              StrokeEndLineCap="Round"
+                                                              RenderTransformOrigin="0.5,0.5"
+                                                              Data="M 21,12 A 9,9 0 1 1 18.3,5.6 M 21,3 L 21,8 L 16,8">
+                                                            <Path.RenderTransform>
+                                                                <RotateTransform Angle="0"/>
+                                                            </Path.RenderTransform>
+                                                        </Path>
+
+                                                        <TextBlock x:Name="TxtUpdateStatus"
+                                                                   Grid.Column="1"
+                                                                   Text="Checking GitHub..."
+                                                                   FontSize="11.5"
+                                                                   FontWeight="SemiBold"
+                                                                   Foreground="{DynamicResource PrimaryTextBrush}"
+                                                                   VerticalAlignment="Center"
+                                                                   TextTrimming="CharacterEllipsis"/>
+
+                                                        <TextBlock x:Name="TxtUpdatePercent"
+                                                                   Grid.Column="2"
+                                                                   Text=""
+                                                                   FontSize="11"
+                                                                   FontWeight="Bold"
+                                                                   FontFamily="Consolas"
+                                                                   Foreground="{DynamicResource AccentBrush}"
+                                                                   VerticalAlignment="Center"
+                                                                   Margin="6,0,0,0"/>
+
+                                                        <Button x:Name="BtnCancelUpdate"
+                                                                Grid.Column="3"
+                                                                Content="✕"
+                                                                Click="BtnCancelUpdate_Click"
+                                                                Style="{StaticResource ChromeIconBtnStyle}"
+                                                                Width="22" Height="22"
+                                                                FontSize="10"
+                                                                Foreground="#F43F5E"
+                                                                Margin="6,0,0,0"
+                                                                ToolTip="Cancel Download"
+                                                                Visibility="Collapsed"/>
+                                                    </Grid>
+
+                                                    <!-- Custom Rounded Animated Progress Bar + Shimmer Sweep -->
+                                                    <Border x:Name="UpdateProgressTrack"
+                                                            Height="7"
+                                                            CornerRadius="3.5"
+                                                            Background="{DynamicResource CardBrush}"
+                                                            ClipToBounds="True"
+                                                            Margin="0,0,0,6">
+                                                        <Grid>
+                                                            <Border x:Name="UpdateProgressFill"
+                                                                    CornerRadius="3.5"
+                                                                    Background="{DynamicResource AccentGradientBrush}"
+                                                                    HorizontalAlignment="Stretch"
+                                                                    RenderTransformOrigin="0,0.5">
+                                                                <Border.RenderTransform>
+                                                                    <ScaleTransform x:Name="UpdateProgressScale" ScaleX="0" ScaleY="1"/>
+                                                                </Border.RenderTransform>
+                                                            </Border>
+                                                            <Border x:Name="UpdateProgressShimmer"
+                                                                    Width="96"
+                                                                    HorizontalAlignment="Left"
+                                                                    IsHitTestVisible="False"
+                                                                    Opacity="0">
+                                                                <Border.Background>
+                                                                    <LinearGradientBrush StartPoint="0,0.5" EndPoint="1,0.5">
+                                                                        <GradientStop Color="#00FFFFFF" Offset="0"/>
+                                                                        <GradientStop Color="#66FFFFFF" Offset="0.5"/>
+                                                                        <GradientStop Color="#00FFFFFF" Offset="1"/>
+                                                                    </LinearGradientBrush>
+                                                                </Border.Background>
+                                                                <Border.RenderTransform>
+                                                                    <TranslateTransform X="-120"/>
+                                                                </Border.RenderTransform>
+                                                            </Border>
+                                                        </Grid>
+                                                    </Border>
+
+                                                    <TextBlock x:Name="TxtUpdateMetrics"
+                                                               Text=""
+                                                               FontSize="10"
+                                                               FontFamily="Consolas"
+                                                               Foreground="{DynamicResource MutedTextBrush}"
+                                                               FlowDirection="LeftToRight"
+                                                               TextTrimming="CharacterEllipsis"/>
+
+                                                    <Button x:Name="BtnOpenManualRelease"
+                                                            Content="⬇ Open GitHub Release Page"
+                                                            Click="BtnOpenManualRelease_Click"
+                                                            Style="{StaticResource PillSoftBtnStyle}"
+                                                            Height="30"
+                                                            FontSize="11"
+                                                            Margin="0,7,0,0"
+                                                            Visibility="Collapsed"/>
+                                                </StackPanel>
+                                            </Border>
+
                                             <Button x:Name="BtnResetAll" Content="↺ Restore Original DNS &amp; Defaults" Click="BtnResetAll_Click" Style="{StaticResource PillSoftBtnStyle}" Height="36"/>
                                         </StackPanel>
                                     </Border>
 
-                                    <TextBlock x:Name="TxtAppFooterVersion" Text="AionToolLite v1.1.0  ·  Created by Yoqaizo"
+                                    <TextBlock x:Name="TxtAppFooterVersion" Text="AionToolLite v1.1.1  ·  Created by Yoqaizo"
                                                FontSize="10.5"
                                                HorizontalAlignment="Center"
                                                Foreground="{DynamicResource MutedTextBrush}"
@@ -787,7 +937,12 @@
                                               Data="M 12,8 A 4,4 0 1 0 12,16 A 4,4 0 1 0 12,8 Z M 12,2 L 12,4 M 12,20 L 12,22 M 4.9,4.9 L 6.3,6.3 M 17.7,17.7 L 19.1,19.1 M 2,12 L 4,12 M 20,12 L 22,12 M 4.9,19.1 L 6.3,17.7 M 17.7,6.3 L 19.1,4.9"/>
                                         <Ellipse x:Name="SettingsUpdateBadge" Width="7" Height="7" Fill="#10B981"
                                                  HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-2,0,0"
-                                                 Visibility="Collapsed"/>
+                                                 RenderTransformOrigin="0.5,0.5"
+                                                 Visibility="Collapsed">
+                                            <Ellipse.RenderTransform>
+                                                <ScaleTransform ScaleX="1" ScaleY="1"/>
+                                            </Ellipse.RenderTransform>
+                                        </Ellipse>
                                     </Grid>
                                     <TextBlock x:Name="LblNavSettings" Text="Settings" FontSize="9" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,3,0,0"/>
                                 </StackPanel>

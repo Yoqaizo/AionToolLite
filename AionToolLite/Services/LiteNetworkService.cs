@@ -52,7 +52,8 @@ namespace AionToolLite.Services
         private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
         private readonly ConcurrentDictionary<string, (IPAddress Ip, DateTime ExpiresUtc)> _resolveCache = new(StringComparer.OrdinalIgnoreCase);
 
-        private static readonly HttpClient SharedHttp = CreateHttpClient();
+        private static readonly HttpClient SharedHttp = CreateHttpClient(TimeSpan.FromSeconds(45));
+        private static readonly HttpClient UpdaterDownloadHttp = CreateHttpClient(Timeout.InfiniteTimeSpan);
 
         private readonly string _cfgDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AionToolLite");
@@ -96,21 +97,22 @@ namespace AionToolLite.Services
         private string HostsManualBackupPath => Path.Combine(_secureStateDir, "hosts.backup.manual");
         private string OriginalDnsBackupPath => Path.Combine(_secureStateDir, "dns_original_backup.json");
 
-        private static HttpClient CreateHttpClient()
+        private static HttpClient CreateHttpClient(TimeSpan timeout)
         {
             var handler = new SocketsHttpHandler
             {
-                PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+                ConnectTimeout = TimeSpan.FromSeconds(15),
+                PooledConnectionLifetime = TimeSpan.FromMinutes(10),
                 AutomaticDecompression = DecompressionMethods.All,
-                MaxAutomaticRedirections = 5,
+                MaxAutomaticRedirections = 8,
                 SslOptions = new SslClientAuthenticationOptions
                 {
                     EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13
                 }
             };
-            var c = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(45) };
+            var c = new HttpClient(handler) { Timeout = timeout };
             var v = Assembly.GetExecutingAssembly().GetName().Version;
-            string uaVer = v != null ? $"{v.Major}.{v.Minor}.{Math.Max(0, v.Build)}" : "1.1.0";
+            string uaVer = v != null ? $"{v.Major}.{v.Minor}.{Math.Max(0, v.Build)}" : "1.1.1";
             c.DefaultRequestHeaders.UserAgent.ParseAdd($"AionToolLite/{uaVer}");
             return c;
         }
@@ -938,10 +940,21 @@ namespace AionToolLite.Services
             return null;
         }
 
+        private static readonly string[] IranIntranetTargets = { "www.arvancloud.ir", "parsvds.com", "salatingames.ir" };
+
+        private async Task<long?> PingIranIntranetAsync()
+        {
+            foreach (var host in IranIntranetTargets)
+            {
+                long? ms = await PingHostFastAsync(host, 1100, 443).ConfigureAwait(false);
+                if (ms.HasValue) return ms.Value;
+            }
+            return null;
+        }
+
         public async Task<LiteTelemetry> CaptureTelemetryAsync(
             string interfaceName,
-            IReadOnlyList<SavedCustomDnsEntry>? customEntries = null,
-            bool useIranRegionalTarget = false)
+            IReadOnlyList<SavedCustomDnsEntry>? customEntries = null)
         {
             string routerIp = await Task.Run(() => DetectGatewayIp(interfaceName)).ConfigureAwait(false);
 
@@ -949,9 +962,7 @@ namespace AionToolLite.Services
                 ? PingHostFastAsync(routerIp, 800, 80)
                 : Task.FromResult<long?>(null);
             await Task.Delay(25).ConfigureAwait(false);
-            string regionalTarget = useIranRegionalTarget ? "www.arvancloud.ir" : "1.1.1.1";
-            int regionalPort = useIranRegionalTarget ? 443 : 53;
-            var tIntranet = PingHostFastAsync(regionalTarget, 1100, regionalPort);
+            var tIntranet = PingIranIntranetAsync();
             await Task.Delay(25).ConfigureAwait(false);
             var tGlobal = PingHostFastAsync("4.2.2.4", 1100, 53);
 
@@ -2922,27 +2933,85 @@ namespace AionToolLite.Services
             }
         }
 
+        public static bool OpenTrustedGitHubReleaseUrl(string? url)
+        {
+            if (!IsTrustedGitHubHttpsUrl(url, out var uri) || uri == null)
+                return false;
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = uri.AbsoluteUri,
+                    UseShellExecute = true
+                });
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static Version GetCurrentAppVersion()
+        {
+            var rawVer = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 1, 1);
+            return new Version(Math.Max(0, rawVer.Major), Math.Max(0, rawVer.Minor), Math.Max(0, rawVer.Build));
+        }
+
+        private static async Task<string?> TryGetLatestTagViaRedirectFallbackAsync(string owner, string repo, CancellationToken token)
+        {
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get, $"https://github.com/{owner}/{repo}/releases/latest");
+                using var resp = await SharedHttp.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+                var finalUri = resp.RequestMessage?.RequestUri;
+                if (finalUri == null || !IsTrustedGitHubHost(finalUri.Host))
+                    return null;
+
+                const string marker = "/releases/tag/";
+                int idx = finalUri.AbsolutePath.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+                if (idx < 0) return null;
+
+                string tag = finalUri.AbsolutePath[(idx + marker.Length)..].Trim('/');
+                return string.IsNullOrWhiteSpace(tag) ? null : Uri.UnescapeDataString(tag);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         public async Task<(bool HasUpdate, string LatestVersion)> CheckLatestUpdateInfoAsync(string owner, string repo, CancellationToken token = default)
         {
             try
             {
-                var rawVer = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 1, 0);
-                var currentVer = new Version(Math.Max(0, rawVer.Major), Math.Max(0, rawVer.Minor), Math.Max(0, rawVer.Build));
-
+                var currentVer = GetCurrentAppVersion();
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
-                cts.CancelAfter(TimeSpan.FromSeconds(8));
+                cts.CancelAfter(TimeSpan.FromSeconds(10));
 
-                using var req = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{owner}/{repo}/releases/latest");
-                req.Headers.Accept.ParseAdd("application/vnd.github+json");
-                using var resp = await SharedHttp.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
-                if (!resp.IsSuccessStatusCode)
-                    return (false, string.Empty);
+                string? tag = null;
+                using (var req = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{owner}/{repo}/releases/latest"))
+                {
+                    req.Headers.Accept.ParseAdd("application/vnd.github+json");
+                    req.Headers.TryAddWithoutValidation("X-GitHub-Api-Version", "2022-11-28");
+                    using var resp = await SharedHttp.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        string json = await resp.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
+                        using var doc = JsonDocument.Parse(json);
+                        tag = doc.RootElement.TryGetProperty("tag_name", out var tEl) ? tEl.GetString() : null;
+                    }
+                    else if ((int)resp.StatusCode == 403 || (int)resp.StatusCode == 429)
+                    {
+                        tag = await TryGetLatestTagViaRedirectFallbackAsync(owner, repo, cts.Token).ConfigureAwait(false);
+                    }
+                }
 
-                string json = await resp.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
-                using var doc = JsonDocument.Parse(json);
-                string tag = doc.RootElement.TryGetProperty("tag_name", out var tEl) ? tEl.GetString() ?? "" : "";
-                if (!Version.TryParse(tag.TrimStart('v', 'V').Trim(), out var parsed) || parsed == null)
+                if (string.IsNullOrWhiteSpace(tag) ||
+                    !Version.TryParse(tag.TrimStart('v', 'V').Trim(), out var parsed) || parsed == null)
+                {
                     return (false, string.Empty);
+                }
 
                 var latestVer = new Version(Math.Max(0, parsed.Major), Math.Max(0, parsed.Minor), Math.Max(0, parsed.Build));
                 return latestVer > currentVer ? (true, latestVer.ToString()) : (false, string.Empty);
@@ -2953,32 +3022,120 @@ namespace AionToolLite.Services
             }
         }
 
-        public async Task<OperationResult> CheckAndInstallUpdateAsync(string owner, string repo, CancellationToken token = default)
+        public async Task<OperationResult> CheckAndInstallUpdateAsync(
+            string owner,
+            string repo,
+            IProgress<UpdateProgressInfo>? progress = null,
+            CancellationToken token = default)
         {
             string? stageDir = null;
             string? stagedExe = null;
+            bool launched = false;
+            string releasesFallbackUrl = $"https://github.com/{owner}/{repo}/releases/latest";
+
+            void Report(
+                UpdateStage stage,
+                string? ver,
+                double pct,
+                long dlBytes,
+                long totalBytes,
+                double speedBps,
+                string en,
+                string fa,
+                string? releaseUrl = null)
+            {
+                progress?.Report(new UpdateProgressInfo(stage, ver, pct, dlBytes, totalBytes, speedBps, en, fa, releaseUrl));
+            }
+
             try
             {
-                var rawVer = Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 1, 0);
-                var currentVer = new Version(Math.Max(0, rawVer.Major), Math.Max(0, rawVer.Minor), Math.Max(0, rawVer.Build));
+                var currentVer = GetCurrentAppVersion();
+                Report(UpdateStage.Checking, null, -1, 0, 0, 0,
+                    "Checking GitHub Releases...",
+                    "در حال بررسی آخرین نسخه در گیت‌هاب...");
 
-                using var req = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{owner}/{repo}/releases/latest");
-                req.Headers.Accept.ParseAdd("application/vnd.github+json");
-                using var resp = await SharedHttp.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
-                if (!resp.IsSuccessStatusCode)
-                    return new OperationResult(false, "You are on the latest version (or GitHub is unreachable).", "شما از آخرین نسخه استفاده می‌کنید (یا گیت‌هاب در دسترس نیست).");
+                using var apiCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                apiCts.CancelAfter(TimeSpan.FromSeconds(20));
 
-                string json = await resp.Content.ReadAsStringAsync(token).ConfigureAwait(false);
+                string json;
+                using (var req = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{owner}/{repo}/releases/latest"))
+                {
+                    req.Headers.Accept.ParseAdd("application/vnd.github+json");
+                    req.Headers.TryAddWithoutValidation("X-GitHub-Api-Version", "2022-11-28");
+                    using var resp = await SharedHttp.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, apiCts.Token).ConfigureAwait(false);
+
+                    if ((int)resp.StatusCode == 404)
+                    {
+                        Report(UpdateStage.UpToDate, currentVer.ToString(), 100, 0, 0, 0,
+                            $"You're up to date (v{currentVer}).",
+                            $"برنامه شما به‌روز است (نسخه {currentVer}).");
+                        return new OperationResult(false, $"You're up to date (v{currentVer}).", $"برنامه شما به‌روز است (نسخه {currentVer}).");
+                    }
+
+                    if ((int)resp.StatusCode == 403 || (int)resp.StatusCode == 429)
+                    {
+                        string? fallbackTag = await TryGetLatestTagViaRedirectFallbackAsync(owner, repo, apiCts.Token).ConfigureAwait(false);
+                        if (!string.IsNullOrWhiteSpace(fallbackTag) &&
+                            Version.TryParse(fallbackTag.TrimStart('v', 'V').Trim(), out var fbVer) && fbVer != null)
+                        {
+                            var cleanFb = new Version(Math.Max(0, fbVer.Major), Math.Max(0, fbVer.Minor), Math.Max(0, fbVer.Build));
+                            if (cleanFb <= currentVer)
+                            {
+                                Report(UpdateStage.UpToDate, currentVer.ToString(), 100, 0, 0, 0,
+                                    $"You're up to date (v{currentVer}).",
+                                    $"برنامه شما به‌روز است (نسخه {currentVer}).");
+                                return new OperationResult(false, $"You're up to date (v{currentVer}).", $"برنامه شما به‌روز است (نسخه {currentVer}).");
+                            }
+
+                            string tagUrl = $"https://github.com/{owner}/{repo}/releases/tag/{Uri.EscapeDataString(fallbackTag)}";
+                            Report(UpdateStage.ManualRequired, cleanFb.ToString(), 0, 0, 0, 0,
+                                $"v{cleanFb} is available (GitHub API rate limit reached).",
+                                $"نسخه v{cleanFb} موجود است (محدودیت موقت API گیت‌هاب).",
+                                tagUrl);
+                            return new OperationResult(false,
+                                $"Update v{cleanFb} found, but GitHub API is temporarily rate-limited. Open Releases to download.",
+                                $"نسخه v{cleanFb} یافت شد اما API گیت‌هاب موقتاً محدود شده است. از صفحه گیت‌هاب دانلود کنید.");
+                        }
+
+                        Report(UpdateStage.Failed, null, 0, 0, 0, 0,
+                            "GitHub API rate limit reached. Try again later.",
+                            "محدودیت موقت API گیت‌هاب؛ کمی بعد دوباره تلاش کنید.",
+                            releasesFallbackUrl);
+                        return new OperationResult(false, "GitHub API rate limit reached. Please try again shortly.", "محدودیت موقت API گیت‌هاب. کمی بعد دوباره امتحان کنید.");
+                    }
+
+                    if (!resp.IsSuccessStatusCode)
+                    {
+                        Report(UpdateStage.Failed, null, 0, 0, 0, 0,
+                            $"GitHub returned HTTP {(int)resp.StatusCode}.",
+                            $"خطای سرور گیت‌هاب (کد {(int)resp.StatusCode}).");
+                        return new OperationResult(false, $"Could not reach GitHub Releases (HTTP {(int)resp.StatusCode}).", $"اتصال به گیت‌هاب ناموفق بود (کد {(int)resp.StatusCode}).");
+                    }
+
+                    json = await resp.Content.ReadAsStringAsync(apiCts.Token).ConfigureAwait(false);
+                }
+
                 using var doc = JsonDocument.Parse(json);
                 string tag = doc.RootElement.TryGetProperty("tag_name", out var tEl) ? tEl.GetString() ?? "" : "";
+                string releaseHtmlUrl = doc.RootElement.TryGetProperty("html_url", out var hEl) ? hEl.GetString() ?? releasesFallbackUrl : releasesFallbackUrl;
+                if (!IsTrustedGitHubHttpsUrl(releaseHtmlUrl, out _))
+                    releaseHtmlUrl = releasesFallbackUrl;
+
                 if (!Version.TryParse(tag.TrimStart('v', 'V').Trim(), out var parsed) || parsed == null)
+                {
+                    Report(UpdateStage.Failed, null, 0, 0, 0, 0, "Could not read release version.", "نسخه انتشار قابل خواندن نیست.");
                     return new OperationResult(false, "Could not read release version.", "نسخه انتشار قابل خواندن نیست.");
+                }
 
                 var latestVer = new Version(Math.Max(0, parsed.Major), Math.Max(0, parsed.Minor), Math.Max(0, parsed.Build));
                 if (latestVer <= currentVer)
+                {
+                    Report(UpdateStage.UpToDate, currentVer.ToString(), 100, 0, 0, 0,
+                        $"You're up to date (v{currentVer}).",
+                        $"برنامه شما به‌روز است (نسخه {currentVer}).");
                     return new OperationResult(false, $"You're up to date (v{currentVer}).", $"برنامه شما به‌روز است (نسخه {currentVer}).");
+                }
 
-                // Require at least one independent cryptographic trust anchor (pinned offline RSA key OR Authenticode signer on current exe)
                 bool hasPinnedRsa = HasPinnedReleasePublicKey();
                 string? currentExeThumbprint = !string.IsNullOrWhiteSpace(Environment.ProcessPath) && VerifyAuthenticodeSignature(Environment.ProcessPath)
                     ? TryGetAuthenticodeThumbprint(Environment.ProcessPath)
@@ -2986,6 +3143,10 @@ namespace AionToolLite.Services
 
                 if (!hasPinnedRsa && string.IsNullOrEmpty(currentExeThumbprint))
                 {
+                    Report(UpdateStage.ManualRequired, latestVer.ToString(), 0, 0, 0, 0,
+                        $"v{latestVer} available — manual download required for local dev builds.",
+                        $"نسخه v{latestVer} آماده است — برای بیلدهای بدون کلید امضا دستی دانلود کنید.",
+                        releaseHtmlUrl);
                     return new OperationResult(
                         false,
                         $"Update v{latestVer} is available, but silent admin install is disabled for unsigned builds. Download manually from GitHub Releases.",
@@ -2994,6 +3155,7 @@ namespace AionToolLite.Services
 
                 string? exeName = null;
                 string? dlUrl = null;
+                long expectedAssetSize = 0;
                 string? checksumName = null;
                 string? checksumUrl = null;
                 string? sigUrl = null;
@@ -3004,11 +3166,17 @@ namespace AionToolLite.Services
                     {
                         string name = a.TryGetProperty("name", out var nEl) ? nEl.GetString() ?? "" : "";
                         string? url = a.TryGetProperty("browser_download_url", out var uEl) ? uEl.GetString() : null;
+                        long sz = a.TryGetProperty("size", out var sEl) && sEl.TryGetInt64(out var parsedSz) ? parsedSz : 0;
 
-                        if (dlUrl == null && name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                        if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
                         {
-                            exeName = name;
-                            dlUrl = url;
+                            bool isSetup = name.Contains("Setup", StringComparison.OrdinalIgnoreCase);
+                            if (dlUrl == null || (isSetup && !(exeName?.Contains("Setup", StringComparison.OrdinalIgnoreCase) ?? false)))
+                            {
+                                exeName = name;
+                                dlUrl = url;
+                                expectedAssetSize = sz;
+                            }
                         }
                         else if (checksumUrl == null &&
                                  (name.Equals("checksums.txt", StringComparison.OrdinalIgnoreCase) ||
@@ -3030,75 +3198,189 @@ namespace AionToolLite.Services
                 }
 
                 if (!IsTrustedGitHubHttpsUrl(dlUrl, out var dlUri) || dlUri == null || string.IsNullOrWhiteSpace(exeName))
+                {
+                    Report(UpdateStage.Failed, latestVer.ToString(), 0, 0, 0, 0,
+                        "No verified installer attached to release.",
+                        "فایل نصبی معتبری در انتشار گیت‌هاب یافت نشد.",
+                        releaseHtmlUrl);
                     return new OperationResult(false, "Update found, but no verified GitHub installer is attached.", "آپدیت جدید یافت شد اما فایل نصبی معتبر یافت نشد.");
+                }
 
-                // Mandatory SHA256 checksum asset (fail-closed: refuse to install if missing!)
                 if (!IsTrustedGitHubHttpsUrl(checksumUrl, out var sumUri) || sumUri == null || string.IsNullOrWhiteSpace(checksumName))
+                {
+                    Report(UpdateStage.ManualRequired, latestVer.ToString(), 0, 0, 0, 0,
+                        "Release is missing checksums.txt.",
+                        "فایل الزامی checksums.txt در انتشار موجود نیست.",
+                        releaseHtmlUrl);
                     return new OperationResult(false, "Update aborted: release is missing a required SHA256 checksum file.", "آپدیت متوقف شد: فایل الزامی چک‌سام SHA256 در انتشار وجود ندارد.");
+                }
 
-                // Download checksum file BEFORE downloading installer
+                Report(UpdateStage.VerifyingSignature, latestVer.ToString(), -1, 0, expectedAssetSize, 0,
+                    $"Verifying v{latestVer} signature & checksum...",
+                    $"در حال تایید امضای دیجیتال و چک‌سام نسخه v{latestVer}...");
+
                 var sumDl = await DownloadSmallTrustedGitHubAssetAsync(sumUri, MaxChecksumBytes, token).ConfigureAwait(false);
                 if (!sumDl.Ok)
+                {
+                    Report(UpdateStage.Failed, latestVer.ToString(), 0, 0, 0, 0, sumDl.ErrorEn, sumDl.ErrorFa, releaseHtmlUrl);
                     return new OperationResult(false, sumDl.ErrorEn, sumDl.ErrorFa);
+                }
 
-                // If an offline RSA-3072 public key is pinned, verify detached signature over checksums.txt BEFORE downloading installer
                 if (hasPinnedRsa)
                 {
                     if (!IsTrustedGitHubHttpsUrl(sigUrl, out var sigUri) || sigUri == null)
+                    {
+                        Report(UpdateStage.ManualRequired, latestVer.ToString(), 0, 0, 0, 0,
+                            "Release is missing cryptographic signature (.sig).",
+                            "فایل امضای دیجیتال (.sig) در انتشار موجود نیست.",
+                            releaseHtmlUrl);
                         return new OperationResult(false, "Update aborted: release is missing a required cryptographic signature (.sig).", "آپدیت متوقف شد: فایل امضای دیجیتال (.sig) در انتشار وجود ندارد.");
+                    }
 
                     var sigDl = await DownloadSmallTrustedGitHubAssetAsync(sigUri, MaxSignatureBytes, token).ConfigureAwait(false);
                     if (!sigDl.Ok)
+                    {
+                        Report(UpdateStage.Failed, latestVer.ToString(), 0, 0, 0, 0, sigDl.ErrorEn, sigDl.ErrorFa, releaseHtmlUrl);
                         return new OperationResult(false, sigDl.ErrorEn, sigDl.ErrorFa);
+                    }
 
                     if (!VerifyDetachedRsaSignature(sumDl.Data, sigDl.Data))
+                    {
+                        Report(UpdateStage.Failed, latestVer.ToString(), 0, 0, 0, 0,
+                            "Cryptographic signature verification failed!",
+                            "تایید امضای دیجیتال انتشار ناموفق بود!");
                         return new OperationResult(false, "Update aborted: cryptographic release signature verification failed!", "آپدیت متوقف شد: تایید امضای دیجیتال انتشار ناموفق بود!");
+                    }
                 }
 
-                // Parse mandatory SHA256 entry for this exact installer filename (fail-closed if missing/unparseable!)
                 string sumText = Encoding.UTF8.GetString(sumDl.Data);
                 byte[]? expectedHashBytes = ParseExpectedSha256Bytes(sumText, exeName, checksumName);
                 if (expectedHashBytes == null || expectedHashBytes.Length != 32)
+                {
+                    Report(UpdateStage.Failed, latestVer.ToString(), 0, 0, 0, 0,
+                        "Checksum file has no valid SHA256 entry.",
+                        "فایل چک‌سام فاقد هش SHA256 معتبر است.");
                     return new OperationResult(false, "Update aborted: checksum file has no valid SHA256 entry for this installer.", "آپدیت متوقف شد: فایل چک‌سام فاقد هش SHA256 معتبر برای این فایل نصبی است.");
+                }
 
                 stageDir = PrepareAdminOnlyUpdateDirectory();
                 if (string.IsNullOrEmpty(stageDir))
+                {
+                    Report(UpdateStage.Failed, latestVer.ToString(), 0, 0, 0, 0,
+                        "Could not prepare verified admin-owned update folder.",
+                        "ایجاد یا تایید مالکیت ادمین پوشه امن آپدیت ناموفق بود.");
                     return new OperationResult(false, "Could not prepare verified admin-owned update folder.", "ایجاد یا تایید مالکیت ادمین پوشه امن آپدیت ناموفق بود.");
+                }
 
                 stagedExe = Path.Combine(stageDir, $"update_{Guid.NewGuid():N}.exe");
                 if (stagedExe.IndexOfAny(ForbiddenShellChars) >= 0 || stageDir.IndexOfAny(ForbiddenShellChars) >= 0)
-                    return new OperationResult(false, "Blocked update: unsafe staging path.", "آپدیت متوقف شد: مسیر ذخیره‌سازی نامعتبر است.");
-
-                using (var dlResp = await SharedHttp.GetAsync(dlUri, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false))
                 {
+                    Report(UpdateStage.Failed, latestVer.ToString(), 0, 0, 0, 0, "Unsafe staging path.", "مسیر ذخیره‌سازی نامعتبر است.");
+                    return new OperationResult(false, "Blocked update: unsafe staging path.", "آپدیت متوقف شد: مسیر ذخیره‌سازی نامعتبر است.");
+                }
+
+                Report(UpdateStage.Downloading, latestVer.ToString(), 0, 0, expectedAssetSize, 0,
+                    $"Downloading v{latestVer} from GitHub...",
+                    $"در حال دانلود نسخه v{latestVer} از گیت‌هاب...");
+
+                byte[] streamedHashBytes;
+                using (var dlReq = new HttpRequestMessage(HttpMethod.Get, dlUri))
+                using (var headerCts = CancellationTokenSource.CreateLinkedTokenSource(token))
+                {
+                    headerCts.CancelAfter(TimeSpan.FromSeconds(30));
+                    using var dlResp = await UpdaterDownloadHttp.SendAsync(dlReq, HttpCompletionOption.ResponseHeadersRead, headerCts.Token).ConfigureAwait(false);
                     dlResp.EnsureSuccessStatusCode();
 
                     var finalUri = dlResp.RequestMessage?.RequestUri;
                     if (finalUri == null || finalUri.Scheme != Uri.UriSchemeHttps || !IsTrustedGitHubHost(finalUri.Host))
+                    {
+                        Report(UpdateStage.Failed, latestVer.ToString(), 0, 0, 0, 0, "Redirected outside trusted GitHub HTTPS.", "ریدایرکت خارج از سرور امن گیت‌هاب.");
                         return new OperationResult(false, "Update aborted: redirected outside trusted GitHub HTTPS.", "آپدیت متوقف شد: ریدایرکت خارج از سرور امن گیت‌هاب.");
+                    }
 
-                    if (dlResp.Content.Headers.ContentLength > MaxUpdaterBytes)
+                    long totalExpected = dlResp.Content.Headers.ContentLength ?? expectedAssetSize;
+                    if (totalExpected > MaxUpdaterBytes)
+                    {
+                        Report(UpdateStage.Failed, latestVer.ToString(), 0, 0, 0, 0, "Installer exceeds 150 MB limit.", "حجم فایل بیش از سقف ۱۵۰ مگابایت است.");
                         return new OperationResult(false, "Update aborted: installer exceeds 150 MB limit.", "آپدیت متوقف شد: حجم فایل بیش از سقف ۱۵۰ مگابایت است.");
+                    }
 
                     await using var src = await dlResp.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
-                    await using var dst = new FileStream(stagedExe, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, true);
-                    byte[] buf = new byte[81920];
-                    long total = 0;
-                    int read;
-                    while ((read = await src.ReadAsync(buf.AsMemory(), token).ConfigureAwait(false)) > 0)
+                    var fsOpts = new FileStreamOptions
                     {
-                        total += read;
-                        if (total > MaxUpdaterBytes)
+                        Mode = FileMode.CreateNew,
+                        Access = FileAccess.Write,
+                        Share = FileShare.None,
+                        BufferSize = 131072,
+                        Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
+                        PreallocationSize = totalExpected > 0 ? totalExpected : 0
+                    };
+                    await using var dst = new FileStream(stagedExe, fsOpts);
+                    using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+
+                    byte[] buf = new byte[131072];
+                    long totalRead = 0;
+                    var speedSw = Stopwatch.StartNew();
+                    long lastTickMs = 0;
+                    long lastTickBytes = 0;
+                    double smoothedBps = 0;
+
+                    while (true)
+                    {
+                        int read;
+                        using (var stallCts = CancellationTokenSource.CreateLinkedTokenSource(token))
+                        {
+                            stallCts.CancelAfter(TimeSpan.FromSeconds(30));
+                            try
+                            {
+                                read = await src.ReadAsync(buf.AsMemory(), stallCts.Token).ConfigureAwait(false);
+                            }
+                            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                            {
+                                throw new TimeoutException("Download stalled for 30 seconds without receiving data.");
+                            }
+                        }
+
+                        if (read <= 0) break;
+
+                        totalRead += read;
+                        if (totalRead > MaxUpdaterBytes)
                             throw new InvalidOperationException("Installer download exceeded 150 MB safety limit.");
+
+                        hasher.AppendData(buf, 0, read);
                         await dst.WriteAsync(buf.AsMemory(0, read), token).ConfigureAwait(false);
+
+                        long nowMs = speedSw.ElapsedMilliseconds;
+                        if (nowMs - lastTickMs >= 85 || (totalExpected > 0 && totalRead >= totalExpected))
+                        {
+                            double dtSec = Math.Max(0.05, (nowMs - lastTickMs) / 1000.0);
+                            double instantBps = (totalRead - lastTickBytes) / dtSec;
+                            smoothedBps = smoothedBps <= 0 ? instantBps : (smoothedBps * 0.65 + instantBps * 0.35);
+                            lastTickMs = nowMs;
+                            lastTickBytes = totalRead;
+
+                            double pct = totalExpected > 0
+                                ? Math.Min(99.5, (totalRead * 100.0) / totalExpected)
+                                : -1;
+
+                            Report(UpdateStage.Downloading, latestVer.ToString(), pct, totalRead, totalExpected, smoothedBps,
+                                $"Downloading v{latestVer}...",
+                                $"در حال دانلود نسخه v{latestVer}...");
+                        }
                     }
+
+                    await dst.FlushAsync(token).ConfigureAwait(false);
+                    streamedHashBytes = hasher.GetHashAndReset();
                 }
 
-                // Validate minimum size and Windows PE magic header ('MZ')
+                Report(UpdateStage.VerifyingHash, latestVer.ToString(), 99.5, 0, 0, 0,
+                    "Verifying SHA256 integrity...",
+                    "در حال بررسی اصالت و هش SHA256...");
+
                 var fi = new FileInfo(stagedExe);
                 if (fi.Length < 100 * 1024)
                 {
-                    try { File.Delete(stagedExe); } catch { }
+                    Report(UpdateStage.Failed, latestVer.ToString(), 0, 0, 0, 0, "Downloaded installer is incomplete.", "فایل دانلودشده ناقص است.");
                     return new OperationResult(false, "Downloaded installer appears incomplete.", "فایل آپدیت دانلودشده ناقص به نظر می‌رسد.");
                 }
 
@@ -3107,46 +3389,47 @@ namespace AionToolLite.Services
                 {
                     if (fs.Read(header, 0, 2) < 2 || header[0] != 0x4D || header[1] != 0x5A)
                     {
-                        fs.Close();
-                        try { File.Delete(stagedExe); } catch { }
+                        Report(UpdateStage.Failed, latestVer.ToString(), 0, 0, 0, 0, "File is not a valid Windows executable.", "فایل اجرایی ویندوز معتبر نیست.");
                         return new OperationResult(false, "Update aborted: downloaded file is not a valid Windows executable.", "آپدیت متوقف شد: فایل دانلودشده یک فایل اجرایی معتبر نیست.");
                     }
                 }
 
-                // Mandatory constant-time SHA256 verification against verified checksums.txt
-                byte[] actualHashBytes;
-                await using (var verifyStream = new FileStream(stagedExe, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, true))
+                byte[] diskHashBytes;
+                await using (var verifyStream = new FileStream(stagedExe, FileMode.Open, FileAccess.Read, FileShare.Read, 131072, FileOptions.Asynchronous | FileOptions.SequentialScan))
                 {
-                    actualHashBytes = await SHA256.HashDataAsync(verifyStream, token).ConfigureAwait(false);
+                    diskHashBytes = await SHA256.HashDataAsync(verifyStream, token).ConfigureAwait(false);
                 }
 
-                if (!CryptographicOperations.FixedTimeEquals(actualHashBytes, expectedHashBytes))
+                if (!CryptographicOperations.FixedTimeEquals(streamedHashBytes, expectedHashBytes) ||
+                    !CryptographicOperations.FixedTimeEquals(diskHashBytes, expectedHashBytes))
                 {
-                    try { File.Delete(stagedExe); } catch { }
+                    Report(UpdateStage.Failed, latestVer.ToString(), 0, 0, 0, 0, "SHA256 checksum mismatch!", "عدم تطابق امضای امنیتی SHA256!");
                     return new OperationResult(false, "Update aborted: SHA256 checksum mismatch!", "آپدیت متوقف شد: عدم تطابق امضای امنیتی SHA256!");
                 }
 
-                // If the running app is Authenticode-signed, enforce matching Authenticode signature on the new installer too
                 if (!string.IsNullOrEmpty(currentExeThumbprint))
                 {
                     string? newThumbprint = VerifyAuthenticodeSignature(stagedExe) ? TryGetAuthenticodeThumbprint(stagedExe) : null;
                     if (!string.Equals(newThumbprint, currentExeThumbprint, StringComparison.OrdinalIgnoreCase))
                     {
-                        try { File.Delete(stagedExe); } catch { }
+                        Report(UpdateStage.Failed, latestVer.ToString(), 0, 0, 0, 0, "Authenticode publisher signature mismatch!", "عدم تطابق امضای دیجیتال ناشر!");
                         return new OperationResult(false, "Update aborted: installer Authenticode publisher signature mismatch!", "آپدیت متوقف شد: عدم تطابق امضای دیجیتال ناشر (Authenticode)!");
                     }
                 }
 
+                if (!IsDirectoryOwnedAndLockedByAdmins(stageDir, strictAdminOnly: true))
+                {
+                    Report(UpdateStage.Failed, latestVer.ToString(), 0, 0, 0, 0, "Staging folder ACL check failed.", "تایید امنیتی پوشه آپدیت ناموفق بود.");
+                    return new OperationResult(false, "Update aborted: staging folder ownership/ACL verification failed.", "آپدیت متوقف شد: تایید امنیتی مالکیت پوشه آپدیت ناموفق بود.");
+                }
+
+                Report(UpdateStage.Installing, latestVer.ToString(), 100, fi.Length, fi.Length, 0,
+                    $"Verified v{latestVer}! Launching installer...",
+                    $"نسخه v{latestVer} تایید شد! در حال اجرای نصاب...");
+
                 string cmdPath = _runner.ResolveSystemExecutable("cmd.exe");
                 string pingPath = _runner.ResolveSystemExecutable("ping.exe");
                 string taskkillPath = _runner.ResolveSystemExecutable("taskkill.exe");
-
-                // Re-verify staging directory ownership & ACL right before executing the verified installer
-                if (!IsDirectoryOwnedAndLockedByAdmins(stageDir, strictAdminOnly: true))
-                {
-                    try { Directory.Delete(stageDir, recursive: true); } catch { }
-                    return new OperationResult(false, "Update aborted: staging folder ownership/ACL verification failed.", "آپدیت متوقف شد: تایید امنیتی مالکیت پوشه آپدیت ناموفق بود.");
-                }
 
                 string innerCmd = $"\"{pingPath}\" -n 3 127.0.0.1 > NUL & \"{taskkillPath}\" /F /IM AionToolLite.exe > NUL 2>&1 & \"{pingPath}\" -n 2 127.0.0.1 > NUL & \"{stagedExe}\" /VERYSILENT /SUPPRESSMSGBOXES /FORCECLOSEAPPLICATIONS /NORESTART & rmdir /s /q \"{stageDir}\" > NUL 2>&1";
                 Process.Start(new ProcessStartInfo
@@ -3157,19 +3440,32 @@ namespace AionToolLite.Services
                     CreateNoWindow = true
                 });
 
+                launched = true;
                 return new OperationResult(true, "READY_TO_UPDATE", "READY_TO_UPDATE");
+            }
+            catch (OperationCanceledException)
+            {
+                Report(UpdateStage.Cancelled, null, 0, 0, 0, 0, "Update cancelled.", "بروزرسانی لغو شد.");
+                return new OperationResult(false, "Update cancelled.", "بروزرسانی لغو شد.");
             }
             catch (Exception ex)
             {
-                if (!string.IsNullOrEmpty(stageDir))
-                {
-                    try { if (Directory.Exists(stageDir) && !IsReparsePoint(stageDir)) Directory.Delete(stageDir, recursive: true); } catch { }
-                }
-                else if (!string.IsNullOrEmpty(stagedExe))
-                {
-                    try { if (File.Exists(stagedExe)) File.Delete(stagedExe); } catch { }
-                }
+                Report(UpdateStage.Failed, null, 0, 0, 0, 0, ex.Message, $"خطا در بروزرسانی: {ex.Message}", releasesFallbackUrl);
                 return new OperationResult(false, $"Update check failed: {ex.Message}", $"بررسی آپدیت ناموفق بود: {ex.Message}");
+            }
+            finally
+            {
+                if (!launched)
+                {
+                    if (!string.IsNullOrEmpty(stageDir))
+                    {
+                        try { if (Directory.Exists(stageDir) && !IsReparsePoint(stageDir)) Directory.Delete(stageDir, recursive: true); } catch { }
+                    }
+                    else if (!string.IsNullOrEmpty(stagedExe))
+                    {
+                        try { if (File.Exists(stagedExe)) File.Delete(stagedExe); } catch { }
+                    }
+                }
             }
         }
 

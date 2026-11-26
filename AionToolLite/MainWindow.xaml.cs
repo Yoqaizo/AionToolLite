@@ -66,6 +66,9 @@ namespace AionToolLite
         private readonly Dictionary<string, long?> _dnsLatencies = new(StringComparer.OrdinalIgnoreCase);
         private CancellationTokenSource? _toastCts;
         private CancellationTokenSource? _netChangeDebounceCts;
+        private CancellationTokenSource? _updateCts;
+        private string? _manualReleaseUrl;
+        private bool _isUpdating;
 
         private bool _loadedOnce;
         private bool _isReady;
@@ -355,7 +358,7 @@ namespace AionToolLite
                 ComboHostsBlocklist.SelectedIndex = 0;
 
                 var asmVer = Assembly.GetExecutingAssembly().GetName().Version;
-                string verLabel = asmVer != null ? $"{asmVer.Major}.{asmVer.Minor}.{Math.Max(0, asmVer.Build)}" : "1.1.0";
+                string verLabel = asmVer != null ? $"{asmVer.Major}.{asmVer.Minor}.{Math.Max(0, asmVer.Build)}" : "1.1.1";
                 TxtAppFooterVersion.Text = $"AionToolLite v{verLabel}  ·  Created by Yoqaizo";
 
                 LiteThemeManager.Apply(_currentTheme);
@@ -486,6 +489,12 @@ namespace AionToolLite
 
                 _pendingUpdateVersion = latestVer;
                 SettingsUpdateBadge.Visibility = Visibility.Visible;
+                try
+                {
+                    var pulse = (Storyboard)FindResource("UpdateBadgePulseStoryboard");
+                    pulse.Begin(this, true);
+                }
+                catch { }
                 UpdateCheckUpdatesButtonLabel();
             }
             catch { }
@@ -575,6 +584,8 @@ namespace AionToolLite
             {
                 UnregisterGlobalHotkey();
                 _telemetryTimer.Stop();
+                _updateCts?.Cancel();
+                _updateCts?.Dispose();
                 _toastCts?.Cancel();
                 _toastCts?.Dispose();
                 _netChangeDebounceCts?.Cancel();
@@ -792,7 +803,7 @@ namespace AionToolLite
             }
             else if (_pingMode == PingChannelMode.Intranet)
             {
-                LblHomePingTitle.Text = L("EDGE · 1.1.1.1", "داخلی · آروان");
+                LblHomePingTitle.Text = L("IRAN · ARVAN", "داخلی · ایران");
                 ApplyPingMetric(_lastTelemetry?.IntranetPingMs, isRouter: false, goodMax: 35, warnMax: 85);
             }
             else
@@ -1899,6 +1910,9 @@ namespace AionToolLite
             LblNavSettings.Text = L("Settings", "تنظیمات");
 
             LblHomeTrafficTitle.Text = L("LIVE TRAFFIC", "مصرف لحظه‌ای");
+            BtnPingCycle.ToolTip = L("Click to switch: Global → Iran (Local) → Modem", "برای تغییر کلیک کنید: جهانی ← داخلی ایران ← مودم");
+            BtnCancelUpdate.ToolTip = L("Cancel Download", "لغو دانلود");
+            BtnOpenManualRelease.Content = L("⬇ Open GitHub Release Page", "⬇ باز کردن صفحه انتشار در گیت‌هاب");
 
             LblDnsTitle.Text = L("Choose a Server", "انتخاب سرور دی‌ان‌اس");
             LblDnsSubtitle.Text = L("Tap to connect · ★ to pin favorite", "برای اتصال بزنید · ★ برای پین کردن");
@@ -2031,24 +2045,241 @@ namespace AionToolLite
             }, "RefreshAdapters");
         }
 
+        private void ShowUpdateProgressPanelAnimated()
+        {
+            if (UpdateProgressPanel.Visibility != Visibility.Visible)
+            {
+                UpdateProgressPanel.Visibility = Visibility.Visible;
+                UpdateProgressPanel.Opacity = 0;
+                var fade = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(220))
+                {
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+                };
+                var slide = new DoubleAnimation(-8, 0, TimeSpan.FromMilliseconds(240))
+                {
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+                };
+                UpdateProgressPanel.BeginAnimation(OpacityProperty, fade);
+                UpdatePanelSlide.BeginAnimation(TranslateTransform.YProperty, slide);
+            }
+        }
+
+        private void SetUpdateAnimationsRunning(bool spinIcon, bool runShimmer)
+        {
+            try
+            {
+                var spin = (Storyboard)FindResource("UpdateSpinStoryboard");
+                if (spinIcon) spin.Begin(this, true);
+                else spin.Stop(this);
+            }
+            catch { }
+
+            try
+            {
+                var shimmer = (Storyboard)FindResource("UpdateShimmerStoryboard");
+                if (runShimmer)
+                {
+                    UpdateProgressShimmer.Opacity = 1;
+                    shimmer.Begin(this, true);
+                }
+                else
+                {
+                    shimmer.Stop(this);
+                    UpdateProgressShimmer.Opacity = 0;
+                }
+            }
+            catch { }
+        }
+
+        private void AnimateUpdateBarTo(double fraction, bool emerald = false)
+        {
+            double clamped = Math.Clamp(fraction, 0.0, 1.0);
+            UpdateProgressFill.Background = emerald
+                ? FrozenGreen
+                : (Brush)FindResource("AccentGradientBrush");
+
+            var anim = new DoubleAnimation(clamped, TimeSpan.FromMilliseconds(180))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            };
+            UpdateProgressScale.BeginAnimation(ScaleTransform.ScaleXProperty, anim);
+        }
+
+        private void ApplyUpdateProgressUi(UpdateProgressInfo info)
+        {
+            if (_isClosing) return;
+            ShowUpdateProgressPanelAnimated();
+
+            TxtUpdateStatus.Text = L(info.StatusEn, info.StatusFa);
+            if (!string.IsNullOrWhiteSpace(info.ReleasePageUrl))
+                _manualReleaseUrl = info.ReleasePageUrl;
+
+            switch (info.Stage)
+            {
+                case UpdateStage.Checking:
+                    UpdateStatusIcon.Stroke = (Brush)FindResource("AccentBrush");
+                    TxtUpdatePercent.Text = "";
+                    TxtUpdateMetrics.Text = L("Connecting to api.github.com (TLS 1.3)...", "در حال اتصال امن به سرور گیت‌هاب...");
+                    BtnCancelUpdate.Visibility = Visibility.Visible;
+                    BtnOpenManualRelease.Visibility = Visibility.Collapsed;
+                    AnimateUpdateBarTo(0.18);
+                    SetUpdateAnimationsRunning(spinIcon: true, runShimmer: true);
+                    break;
+
+                case UpdateStage.VerifyingSignature:
+                    UpdateStatusIcon.Stroke = FrozenCyan;
+                    TxtUpdatePercent.Text = "RSA";
+                    TxtUpdateMetrics.Text = L("Checking offline RSA-3072 signature & SHA256 manifest...", "بررسی امضای دیجیتال RSA-3072 و چک‌سام...");
+                    BtnCancelUpdate.Visibility = Visibility.Visible;
+                    BtnOpenManualRelease.Visibility = Visibility.Collapsed;
+                    AnimateUpdateBarTo(0.28);
+                    SetUpdateAnimationsRunning(spinIcon: true, runShimmer: true);
+                    break;
+
+                case UpdateStage.Downloading:
+                    UpdateStatusIcon.Stroke = (Brush)FindResource("AccentBrush");
+                    BtnCancelUpdate.Visibility = Visibility.Visible;
+                    BtnOpenManualRelease.Visibility = Visibility.Collapsed;
+                    if (info.Percent >= 0)
+                    {
+                        TxtUpdatePercent.Text = $"{info.Percent:F0}%";
+                        AnimateUpdateBarTo(info.Percent / 100.0);
+                    }
+                    else
+                    {
+                        TxtUpdatePercent.Text = "...";
+                        AnimateUpdateBarTo(0.55);
+                    }
+
+                    double dlMb = info.BytesDownloaded / 1048576.0;
+                    string sizePart = info.TotalBytes > 0
+                        ? $"{dlMb:F1} / {info.TotalBytes / 1048576.0:F1} MB"
+                        : $"{dlMb:F1} MB";
+                    string speedPart = info.SpeedBytesPerSec > 0
+                        ? $"  ·  {FormatRate(info.SpeedBytesPerSec)}"
+                        : string.Empty;
+                    string etaPart = string.Empty;
+                    if (info.TotalBytes > info.BytesDownloaded && info.SpeedBytesPerSec > 20480)
+                    {
+                        int etaSec = (int)Math.Ceiling((info.TotalBytes - info.BytesDownloaded) / info.SpeedBytesPerSec);
+                        if (etaSec > 0 && etaSec < 3600)
+                            etaPart = etaSec >= 60 ? $"  ·  ~{etaSec / 60}m {etaSec % 60}s" : $"  ·  ~{etaSec}s";
+                    }
+                    TxtUpdateMetrics.Text = $"{sizePart}{speedPart}{etaPart}";
+                    SetUpdateAnimationsRunning(spinIcon: true, runShimmer: true);
+                    break;
+
+                case UpdateStage.VerifyingHash:
+                    UpdateStatusIcon.Stroke = FrozenCyan;
+                    TxtUpdatePercent.Text = "SHA256";
+                    TxtUpdateMetrics.Text = L("Verifying downloaded installer integrity on disk...", "در حال تایید نهایی هش SHA256 روی دیسک...");
+                    BtnCancelUpdate.Visibility = Visibility.Collapsed;
+                    AnimateUpdateBarTo(0.99);
+                    SetUpdateAnimationsRunning(spinIcon: true, runShimmer: true);
+                    break;
+
+                case UpdateStage.Installing:
+                    UpdateStatusIcon.Stroke = FrozenGreen;
+                    TxtUpdatePercent.Text = "100%";
+                    TxtUpdateMetrics.Text = L("Signature & SHA256 verified · Starting silent upgrade...", "امضا و SHA256 تایید شد · شروع نصب خودکار...");
+                    BtnCancelUpdate.Visibility = Visibility.Collapsed;
+                    BtnOpenManualRelease.Visibility = Visibility.Collapsed;
+                    AnimateUpdateBarTo(1.0, emerald: true);
+                    SetUpdateAnimationsRunning(spinIcon: false, runShimmer: false);
+                    break;
+
+                case UpdateStage.UpToDate:
+                    UpdateStatusIcon.Stroke = FrozenGreen;
+                    TxtUpdatePercent.Text = "✓";
+                    TxtUpdateMetrics.Text = L("No newer release available on GitHub.", "نسخه جدیدتری روی گیت‌هاب منتشر نشده است.");
+                    BtnCancelUpdate.Visibility = Visibility.Collapsed;
+                    BtnOpenManualRelease.Visibility = Visibility.Collapsed;
+                    AnimateUpdateBarTo(1.0, emerald: true);
+                    SetUpdateAnimationsRunning(spinIcon: false, runShimmer: false);
+                    break;
+
+                case UpdateStage.ManualRequired:
+                    UpdateStatusIcon.Stroke = FrozenAmber;
+                    TxtUpdatePercent.Text = info.TargetVersion != null ? $"v{info.TargetVersion}" : "!";
+                    TxtUpdateMetrics.Text = L("Click below to download the official installer from GitHub.", "برای دانلود مستقیم از گیت‌هاب روی دکمه زیر بزنید.");
+                    BtnCancelUpdate.Visibility = Visibility.Collapsed;
+                    BtnOpenManualRelease.Visibility = !string.IsNullOrWhiteSpace(_manualReleaseUrl) ? Visibility.Visible : Visibility.Collapsed;
+                    AnimateUpdateBarTo(0.0);
+                    SetUpdateAnimationsRunning(spinIcon: false, runShimmer: false);
+                    break;
+
+                case UpdateStage.Cancelled:
+                    UpdateStatusIcon.Stroke = FrozenAmber;
+                    TxtUpdatePercent.Text = "—";
+                    TxtUpdateMetrics.Text = L("Download cancelled and temporary files cleaned up.", "دانلود لغو و فایل‌های موقت پاکسازی شد.");
+                    BtnCancelUpdate.Visibility = Visibility.Collapsed;
+                    BtnOpenManualRelease.Visibility = Visibility.Collapsed;
+                    AnimateUpdateBarTo(0.0);
+                    SetUpdateAnimationsRunning(spinIcon: false, runShimmer: false);
+                    break;
+
+                case UpdateStage.Failed:
+                    UpdateStatusIcon.Stroke = FrozenRed;
+                    TxtUpdatePercent.Text = "!";
+                    TxtUpdateMetrics.Text = L("You can retry or download manually from GitHub Releases.", "می‌توانید دوباره تلاش کنید یا از صفحه گیت‌هاب دانلود کنید.");
+                    BtnCancelUpdate.Visibility = Visibility.Collapsed;
+                    BtnOpenManualRelease.Visibility = !string.IsNullOrWhiteSpace(_manualReleaseUrl) ? Visibility.Visible : Visibility.Collapsed;
+                    AnimateUpdateBarTo(0.0);
+                    SetUpdateAnimationsRunning(spinIcon: false, runShimmer: false);
+                    break;
+            }
+        }
+
+        private void BtnCancelUpdate_Click(object sender, RoutedEventArgs e)
+        {
+            try { _updateCts?.Cancel(); } catch { }
+            BtnCancelUpdate.IsEnabled = false;
+        }
+
+        private void BtnOpenManualRelease_Click(object sender, RoutedEventArgs e)
+        {
+            string url = !string.IsNullOrWhiteSpace(_manualReleaseUrl)
+                ? _manualReleaseUrl
+                : "https://github.com/Yoqaizo/AionToolLite/releases/latest";
+            if (!LiteNetworkService.OpenTrustedGitHubReleaseUrl(url))
+                ShowToast(L("Could not open browser.", "باز کردن مرورگر ناموفق بود."), isError: true);
+        }
+
         private async void BtnCheckUpdates_Click(object sender, RoutedEventArgs e)
         {
+            if (_isUpdating) return;
+            _isUpdating = true;
+            _manualReleaseUrl = null;
             BtnCheckUpdates.IsEnabled = false;
-            BtnCheckUpdates.Content = L("Checking GitHub...", "در حال بررسی گیت‌هاب...");
+            BtnCancelUpdate.IsEnabled = true;
+            BtnCheckUpdates.Content = L("⏳ Updating...", "⏳ در حال بررسی و دانلود...");
+
+            _updateCts?.Cancel();
+            _updateCts?.Dispose();
+            _updateCts = new CancellationTokenSource(TimeSpan.FromMinutes(15));
+
+            var progress = new Progress<UpdateProgressInfo>(ApplyUpdateProgressUi);
+            bool launchingUpgrade = false;
+
             await RunSafeAsync(async () =>
             {
-                using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
-                var res = await _service.CheckAndInstallUpdateAsync("Yoqaizo", "AionToolLite", cts.Token);
+                var res = await _service.CheckAndInstallUpdateAsync("Yoqaizo", "AionToolLite", progress, _updateCts.Token);
                 if (res.Success && res.MessageEn == "READY_TO_UPDATE")
                 {
+                    launchingUpgrade = true;
+                    await Task.Delay(650);
                     ExitApplicationCompletely();
                     return;
                 }
-                ShowToast(L(res.MessageEn, res.MessageFa), isError: !res.Success);
+                ShowToast(L(res.MessageEn, res.MessageFa), isError: !res.Success && res.MessageEn != "Update cancelled.");
             }, "CheckUpdates");
 
-            if (!_isClosing)
+            _isUpdating = false;
+            if (!_isClosing && !launchingUpgrade)
             {
+                SetUpdateAnimationsRunning(spinIcon: false, runShimmer: false);
+                BtnCancelUpdate.Visibility = Visibility.Collapsed;
+                BtnCancelUpdate.IsEnabled = true;
                 BtnCheckUpdates.IsEnabled = true;
                 UpdateCheckUpdatesButtonLabel();
             }
@@ -2154,7 +2385,7 @@ namespace AionToolLite
             _isTelemetryTickRunning = true;
             try
             {
-                var snap = await _service.CaptureTelemetryAsync(_selectedAdapter, SavedCustomEntries, useIranRegionalTarget: IsFa);
+                var snap = await _service.CaptureTelemetryAsync(_selectedAdapter, SavedCustomEntries);
                 if (_isClosing) return;
 
                 _lastTelemetry = snap;

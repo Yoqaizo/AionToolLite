@@ -201,6 +201,30 @@ namespace AionToolLite.Models
         string MessageEn,
         string MessageFa);
 
+    public enum UpdateStage
+    {
+        Checking,
+        VerifyingSignature,
+        Downloading,
+        VerifyingHash,
+        Installing,
+        UpToDate,
+        ManualRequired,
+        Cancelled,
+        Failed
+    }
+
+    public sealed record UpdateProgressInfo(
+        UpdateStage Stage,
+        string? TargetVersion,
+        double Percent,
+        long BytesDownloaded,
+        long TotalBytes,
+        double SpeedBytesPerSec,
+        string StatusEn,
+        string StatusFa,
+        string? ReleasePageUrl = null);
+
     public static class LiteCatalog
     {
         private static readonly Regex StrictHostnameRegex = new(

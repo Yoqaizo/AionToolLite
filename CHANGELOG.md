@@ -2,6 +2,16 @@
 
 All notable changes to **AionToolLite** are documented in this file.
 
+## [1.1.1] - 2026-11-26
+### Added
+- **Animated & Optimized GitHub Auto-Updater:** Added smooth animated update progress panel in Settings (spinning status icon, custom rounded gradient progress bar with shimmer sweep, live %, MB progress, speed MB/s, ETA, cancel button, and pulsing Settings update badge).
+- **Dedicated High-Throughput Downloader:** Added `UpdaterDownloadHttp` (`Timeout.InfiniteTimeSpan`, 128 KB async streaming, file preallocation, 30s stall timeout, incremental SHA256 + on-disk constant-time re-check) and GitHub API rate-limit redirect fallback.
+
+### Fixed
+- **Home Page Iran Ping:** Fixed channel 2 pinging `1.1.1.1` (`EDGE · 1.1.1.1`) in English mode; now always probes Iran intranet (`www.arvancloud.ir` with automatic fallback to `parsvds.com` / `salatingames.ir`) in both English and Persian.
+- **Staging Cleanup & Asset Selection:** Guaranteed `stage_<GUID>` folder deletion in `finally` on any abort/cancel and prioritized `*Setup*.exe` release assets.
+- **Release Script Reliability:** Switched offline RSA-3072 signing in `Release-Manager.ps1` to PowerShell 5.1/7-safe `RSACryptoServiceProvider` with self-verification and added early protection against overwriting existing GitHub release tags.
+
 ## [1.1.0] - 2026-11-21
 ### Added
 - **Native Windows 11 DoH Encryption:** One-tap DoH toggle (`netsh dns add encryption` with `udpfallback=yes`) and `DoH` micro-badges on supported resolvers.

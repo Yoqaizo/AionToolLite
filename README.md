@@ -5,7 +5,7 @@
 
   <p>
     <a href="https://github.com/Yoqaizo/AionToolLite/releases/latest">
-      <img src="https://img.shields.io/badge/Version-v1.1.0-B57BFF?style=for-the-badge" alt="Version v1.1.0" />
+      <img src="https://img.shields.io/badge/Version-v1.1.1-B57BFF?style=for-the-badge" alt="Version v1.1.1" />
     </a>
     <img src="https://img.shields.io/badge/.NET-8.0%20WPF-512BD4?style=for-the-badge&logo=dotnet&logoColor=white" alt=".NET 8.0 WPF" />
     <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 10/11 x64" />
@@ -36,7 +36,7 @@
 | **One-Tap Power Orb** | Animated connect/disconnect control that backs up your original IPv4 (including `127.0.0.1` local resolvers) and IPv6 DNS on first change, restores them cleanly on disconnect, and flushes the Windows DNS cache. |
 | **25 DNS Presets + 5 Custom Slots** | Real RFC 1035 **UDP/53** latency benchmark, **Smart Auto** (strictly limited to 6 neutral, unfiltered global resolvers), one-tap **Connect to Fastest**, `★` pinned favorites, and up to **5 named Saved Custom DNS** slots. |
 | **Native Windows 11 DoH Encryption** | One-tap native **DNS-over-HTTPS** (`netsh dns add encryption` with `udpfallback=yes`) on supported resolvers, plus IPv6 DNS leak warnings when an IPv4-only preset is active alongside router IPv6 DNS. |
-| **Clickable 3-Mode Live Ping** | Cycle between **Global (`4.2.2.4`)**, **Regional Edge** (`1.1.1.1` in English / `ArvanCloud` in Persian), and **Modem Gateway** latency alongside live adapter download/upload rates. |
+| **Clickable 3-Mode Live Ping** | Cycle between **Global (`4.2.2.4`)**, **Iran Intranet** (`ArvanCloud` with automatic Iranian fallback), and **Modem Gateway** latency alongside live adapter download/upload rates. |
 | **Physical-First Adapter Scanner** | Uses Windows Registry hardware flags (`NCF_PHYSICAL`) across all Windows display languages (including disabled physical NICs) while filtering out VPN tunnels (`Wintun`, `WireGuard`, `Sing-box`, `OpenVPN`), `VMware`, `WSL`, and virtual adapters. |
 | **Boost, Stability & Scoped Adapter Reset** | **Game Mode** (allowlisted 4 services with reboot detection), **Ad & Tracker Shield**, **Quick Fix**, **Scoped Adapter Reset** (restarts only the chosen adapter without wiping global static IPs), 6-second **Speed Check**, and a 4-second **Stability & Packet Loss / Jitter Check** (detecting routers that drop ICMP separately). |
 | **Windows Hosts Manager** | Serialized (`SemaphoreSlim`), fail-closed backup-protected management of Windows `hosts` with lightweight and full blocklists, clean original/manual Restore, Notepad shortcut, and Default reset. |
@@ -71,9 +71,9 @@ Because changing Windows network configuration requires `Administrator` privileg
 ## Installation
 
 1. Go to the [**Latest Release**](https://github.com/Yoqaizo/AionToolLite/releases/latest) page.
-2. Download **`AionToolLite_Setup_v1.1.0.exe`**.
+2. Download **`AionToolLite_Setup_v1.1.1.exe`**.
 3. Run the installer (installs to `C:\Program Files\AionToolLite`) and launch **AionToolLite**.
-4. Verify integrity optionally with `Get-FileHash .\AionToolLite_Setup_v1.1.0.exe -Algorithm SHA256` against `checksums.txt`.
+4. Verify integrity optionally with `Get-FileHash .\AionToolLite_Setup_v1.1.1.exe -Algorithm SHA256` against `checksums.txt`.
 
 ---
 
